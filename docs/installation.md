@@ -13,7 +13,7 @@ and [Troubleshooting](../README.md#limitations) covers the common causes.
 git clone https://github.com/atahan99/bluesentinel.git
 cd bluesentinel
 python3 -m pip install -r requirements.txt
-python3 -m pytest tests/ -q          # 27 tests, no hardware needed
+python3 -m pytest tests/ -q          # 30 tests, no hardware needed
 ```
 
 If the tests pass, the code is sound and everything below is hardware setup.

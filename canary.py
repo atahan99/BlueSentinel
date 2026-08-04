@@ -30,6 +30,10 @@ RESET_SETTLE = 2.0  # seconds for the nRF51 to come back after ATZ
 # The bait therefore goes dark on its own and has to be kicked back on the air.
 ADV_TIMEOUT = 180
 
+# Emitted on every poll while a peer is connected -- useful in the log, noise on
+# a terminal. Everything still reaches logs/canary.jsonl.
+QUIET = {"rssi"}
+
 
 def find_port():
     """First CP210x serial port, or None. Never hardcode a device path.
@@ -133,7 +137,9 @@ class Log:
                "profile": profile, "data": data}
         self.fh.write(json.dumps(rec) + "\n")
         self.fh.flush()  # a honeypot log you lose on crash is worthless
-        print(json.dumps(rec), flush=True)
+        # stdout is for whoever is watching; the file is the machine interface.
+        if event not in QUIET:
+            print(parse.format_event(rec), flush=True)
 
 
 def run_session(dev, log, profiles, args):

@@ -285,3 +285,23 @@ def test_clock_offset_is_harmless_on_a_healthy_clock():
 
 def test_iso_round_trips_through_ts_seconds():
     assert parse.ts_seconds(parse.iso(1785793021.316)) == 1785793021.316
+
+
+def test_format_event_is_readable():
+    line = parse.format_event({"ts": "2026-08-04T01:01:28.817Z", "event": "connect",
+                               "profile": "keyboard",
+                               "data": {"rssi": -50, "peer": "43:5C:DF:ED:90:CB"}})
+    assert line.startswith("01:01:28  connect")
+    assert "keyboard" in line and "-50 dBm" in line and "43:5C:DF:ED:90:CB" in line
+
+
+def test_format_event_handles_unknown_events():
+    """New event types must render rather than needing a branch each."""
+    line = parse.format_event({"ts": "2026-08-04T01:01:28.817Z",
+                               "event": "something_new", "data": {"whatever": 1}})
+    assert "01:01:28" in line and "something_new" in line
+
+
+def test_format_event_survives_a_bare_record():
+    """A malformed record must not crash a running collector."""
+    assert parse.format_event({}).split() == ["--:--:--", "-"]

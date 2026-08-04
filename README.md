@@ -68,7 +68,7 @@ firmware 4.1.1, nrfutil 8.2.0, tshark 4.6.7. **Windows is out of scope.**
 git clone https://github.com/atahan99/bluesentinel.git
 cd bluesentinel
 python3 -m pip install -r requirements.txt
-python3 -m pytest tests/ -q          # 27 tests, no hardware needed
+python3 -m pytest tests/ -q          # 30 tests, no hardware needed
 ```
 
 That is enough to run the test suite and to replay the bundled capture. Setting up the
@@ -89,7 +89,29 @@ python3 witness.py E1:84:87:02:B3:1E                 # terminal 2
 python3 report.py                                    # any time
 ```
 
-Both stop cleanly on Ctrl-C. For a trial run, `--duration` makes them stop by themselves:
+The canary prints each event as it happens, so you can see the thing working:
+
+```
+01:00:14  advertising_start             E1:84:87:02:B3:1E
+01:01:22  profile_change  keyboard      KB-8802
+01:01:28  connect         keyboard      43:5C:DF:ED:90:CB  -50 dBm
+01:01:44  uart_write      keyboard      hello
+01:01:53  disconnect      keyboard
+```
+
+That is a view for whoever is watching. `logs/canary.jsonl` is the machine interface and
+keeps everything, including the per-poll RSSI readings the terminal suppresses as noise.
+The witness has no live view — it writes a pcap and converts once the capture ends.
+
+For a running summary rather than a feed, re-run the report on a loop; it re-reads both
+logs each time:
+
+```bash
+while true; do clear; python3 report.py; sleep 2; done
+```
+
+Both collectors stop cleanly on Ctrl-C. For a trial run, `--duration` makes them stop by
+themselves:
 
 ```bash
 python3 canary.py --duration 60 --dwell 20

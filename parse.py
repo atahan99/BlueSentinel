@@ -287,6 +287,32 @@ def clock_offset(last_frame, capture_end):
     return capture_end - last_frame
 
 
+# Fields worth showing on a terminal, in the order they read best. Anything not
+# listed is still in the log file -- this is a view, not a filter.
+DETAIL = ("name", "address", "peer", "initiator", "scanner", "rssi", "op",
+          "bytes", "before", "after", "error", "reason", "status")
+
+
+def format_event(rec):
+    """One human-readable line for a log record.
+
+    The JSONL file stays canonical and machine-readable; this exists only so a
+    running collector is legible over your shoulder. Unknown event types render
+    fine rather than needing a branch each.
+
+    >>> format_event({"ts": "2026-08-04T01:01:28.817Z", "event": "connect",
+    ...               "profile": "keyboard", "data": {"rssi": -50}})
+    '01:01:28  connect         keyboard    -50 dBm'
+    """
+    data = rec.get("data") or {}
+    detail = ["%d dBm" % v if k == "rssi" else str(v)
+              for k, v in ((k, data.get(k)) for k in DETAIL) if v is not None]
+    return "%s  %-15s %-11s %s" % ((rec.get("ts") or "")[11:19] or "--:--:--",
+                                   rec.get("event") or "-",
+                                   rec.get("profile") or "",
+                                   "  ".join(detail))
+
+
 def profile_windows(canary_events):
     """Build [(start_ts, end_ts_or_None, profile)] from canary log events.
 
