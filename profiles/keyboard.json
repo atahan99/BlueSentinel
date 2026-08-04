@@ -1,0 +1,5 @@
+{
+  "name": "KB-8802",
+  "advdata": "02-01-06-03-03-12-18-03-19-c1-03",
+  "note": "Human Interface Device (0x1812) with appearance 0x03C1 (Keyboard). The most interesting bait here: an unpaired HID is what an attacker looking for input injection would go for."
+}

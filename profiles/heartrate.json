@@ -1,0 +1,5 @@
+{
+  "name": "HRM-0442",
+  "advdata": "02-01-06-03-03-0d-18",
+  "note": "Flags + complete 16-bit service UUID list containing 0x180D Heart Rate. A standard SIG service UUID, not a vendor identifier. Wearables and fitness apps scan for this, which makes it a different net than the smartlock profile."
+}

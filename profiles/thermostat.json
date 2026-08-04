@@ -1,0 +1,5 @@
+{
+  "name": "ThermoNode-11",
+  "advdata": "02-01-06-03-03-1a-18",
+  "note": "Environmental Sensing (0x181A). Reads as a room sensor or smart-home node -- a different net than wearables."
+}

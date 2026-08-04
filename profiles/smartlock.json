@@ -1,0 +1,5 @@
+{
+  "name": "SmartLock-7A21",
+  "advdata": "02-01-06-03-03-15-18",
+  "note": "Flags (LE General Discoverable, BR/EDR not supported) + complete 16-bit service UUID list containing 0x1815 Automation IO. Deliberately generic: a plausible actuator, not a clone of any real product's identifiers. The device name rides in the scan response, which the Bluefruit fills in from AT+GAPDEVNAME."
+}
