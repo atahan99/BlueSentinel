@@ -1,0 +1,6 @@
+pyserial>=3.5
+
+# pytest is listed here rather than in a separate dev file because the test
+# suite is the first install step -- it is how you check the code works before
+# touching any hardware.
+pytest>=7.0

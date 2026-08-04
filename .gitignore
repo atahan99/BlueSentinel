@@ -1,0 +1,9 @@
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.pcapng
+!docs/sample-capture.pcapng
+.pytest_cache/
+.DS_Store
