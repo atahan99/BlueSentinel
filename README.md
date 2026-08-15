@@ -65,8 +65,8 @@ firmware 4.1.1, nrfutil 8.2.0, tshark 4.6.7. **Windows is out of scope.**
 ## Install
 
 ```bash
-git clone https://github.com/atahan99/bluesentinel.git
-cd bluesentinel
+git clone https://github.com/atahan99/BlueSentinel.git
+cd BlueSentinel
 python3 -m pip install -r requirements.txt
 python3 -m pytest tests/ -q          # 30 tests, no hardware needed
 ```

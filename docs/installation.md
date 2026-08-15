@@ -10,8 +10,8 @@ and [Troubleshooting](../README.md#limitations) covers the common causes.
 ## 0. The repo
 
 ```bash
-git clone https://github.com/atahan99/bluesentinel.git
-cd bluesentinel
+git clone https://github.com/atahan99/BlueSentinel.git
+cd BlueSentinel
 python3 -m pip install -r requirements.txt
 python3 -m pytest tests/ -q          # 30 tests, no hardware needed
 ```
