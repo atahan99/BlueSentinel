@@ -99,6 +99,13 @@ The canary prints each event as it happens, so you can see the thing working:
 01:01:53  disconnect      keyboard
 ```
 
+<img src="docs/screenshot-live-run.png" alt="Three terminals: the canary logging connections, the witness capturing, and report.py refreshing" width="100%">
+
+*A run in progress — canary bottom left, witness top right, `report.py` on a two-second
+loop bottom right. The incidents there say `canary` and `att 0` because the witness
+converts its capture only when it stops; they become `canary+witness` with the ATT counts
+filled in on the refresh after that. Prober addresses and the local username are redacted.*
+
 That is a view for whoever is watching. `logs/canary.jsonl` is the machine interface and
 keeps everything, including the per-poll RSSI readings the terminal suppresses as noise.
 The witness has no live view — it writes a pcap and converts once the capture ends.
