@@ -35,14 +35,17 @@ ADV_TIMEOUT = 180
 QUIET = {"rssi"}
 
 
-def find_port():
-    """First CP210x serial port, or None. Never hardcode a device path.
+def find_port(ids=CP210X):
+    """First serial port matching a (vid, pid), or None. Never hardcode a path.
 
     On macOS this yields /dev/cu.* -- pyserial lists the callout node, which is
     the one you want; opening /dev/tty.* blocks on carrier detect and hangs.
+
+    Defaults to the bait's CP210x. tui.py passes the sniffer's ids to ask the
+    same question about the other radio, so the two do not drift apart.
     """
     for p in list_ports.comports():
-        if (p.vid, p.pid) == CP210X:
+        if (p.vid, p.pid) == ids:
             return p.device
     return None
 

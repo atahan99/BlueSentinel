@@ -68,7 +68,7 @@ firmware 4.1.1, nrfutil 8.2.0, tshark 4.6.7. **Windows is out of scope.**
 git clone https://github.com/atahan99/BlueSentinel.git
 cd BlueSentinel
 python3 -m pip install -r requirements.txt
-python3 -m pytest tests/ -q          # 30 tests, no hardware needed
+python3 -m pytest tests/ -q          # 33 tests, no hardware needed
 ```
 
 That is enough to run the test suite and to replay the bundled capture. Setting up the
@@ -81,7 +81,39 @@ five steps, each with a check:
 
 ## Usage
 
-Two terminals. The canary prints the bait address on startup; give it to the witness.
+One command. It finds both radios, starts the bait, reads the advertising address out of
+the canary's own log, and points the sniffer at it — the one step you otherwise do by hand,
+and the one that silently ruins a run when you get it wrong.
+
+```bash
+python3 tui.py
+```
+
+Press `s`. `q` quits and shuts both collectors down cleanly.
+
+<img src="docs/screenshot-tui.png" alt="The BlueSentinel console: both radios detected, the live event feed, and a warning in the status line" width="100%">
+
+*A finished 200-second run. Both radios detected by USB id, the bait address handed to the
+sniffer without anyone typing it, and four disguises probed in three minutes. The status
+line is carrying a real warning from the converter — see [hardware notes](docs/hardware-notes.md#1-findings-that-shaped-the-code).
+Vertical whitespace cropped; nothing else altered.*
+
+| key | |
+|---|---|
+| `s` | start / stop both collectors |
+| `tab` | switch between the live feed and the incident report |
+| `r` | rebuild the report from the capture so far |
+| `w` | re-point the sniffer after an `address_changed` |
+| `q` | quit |
+
+The feed shows what the canary shows — per-poll RSSI stays in the log rather than on the
+screen. The report pane re-derives incidents from the growing pcap, so ATT counts appear
+while the run is still going rather than only after it stops.
+
+### Or drive the three scripts yourself
+
+The console is a supervisor; it adds no collection logic, and the scripts remain the
+interface. Two terminals, and the canary prints the bait address on startup:
 
 ```bash
 python3 canary.py                                    # terminal 1
@@ -101,14 +133,13 @@ The canary prints each event as it happens, so you can see the thing working:
 
 <img src="docs/screenshot-live-run.png" alt="Three terminals: the canary logging connections, the witness capturing, and report.py refreshing" width="100%">
 
-*A run in progress — canary bottom left, witness top right, `report.py` on a two-second
-loop bottom right. The incidents there say `canary` and `att 0` because the witness
-converts its capture only when it stops; they become `canary+witness` with the ATT counts
-filled in on the refresh after that. Prober addresses and the local username are redacted.*
+*The same thing before the console existed — canary bottom left, witness top right,
+`report.py` on a two-second loop bottom right. Run this way the witness converts only when
+it stops, which is why those incidents say `canary` and `att 0`. Prober addresses and the
+local username are redacted.*
 
 That is a view for whoever is watching. `logs/canary.jsonl` is the machine interface and
 keeps everything, including the per-poll RSSI readings the terminal suppresses as noise.
-The witness has no live view — it writes a pcap and converts once the capture ends.
 
 For a running summary rather than a feed, re-run the report on a loop; it re-reads both
 logs each time:
@@ -149,6 +180,10 @@ events from an existing pcap · `--pcap` / `--log` paths · `--port` / `--tshark
 `--nrfutil` overrides
 
 `report.py` — `--format table|json|csv` · `--canary` / `--witness` log paths
+
+`tui.py` — `--dwell` / `--duration` / `--port` passed through to the canary · `--start`
+begin collecting immediately instead of on `s` · `--selfcheck` run the built-in checks and
+exit
 
 ---
 
@@ -205,10 +240,15 @@ whole picture; together they do.
 Bluefruit LE Friend ──USB serial──> canary.py  ──> logs/canary.jsonl  ─┐
                                                                       ├─> report.py
 nRF52840 Dongle ────────nrfutil──> witness.py ──> logs/witness.jsonl ─┘
+                                                        ^
+                                     tui.py  ───────────┘  supervises both,
+                                                           reads the same logs
 ```
 
 The collectors never talk to each other. If one dies the other keeps running, and
-correlation happens offline at read time.
+correlation happens offline at read time. `tui.py` supervises rather than participates: it
+spawns the same two scripts and reads the same files on disk, so anything it shows you can
+be reproduced by running them by hand.
 
 | Module | Does |
 |---|---|
@@ -216,6 +256,7 @@ correlation happens offline at read time.
 | `witness.py` | runs the sniffer following the bait's address, converts the capture to events |
 | `parse.py` | pure functions: bytes and JSON in, event dicts out. No I/O |
 | `report.py` | merges both logs into incidents, each attributed to the disguise that was live |
+| `tui.py` | one console over the other four: finds the radios, runs the collectors, hands the bait address from one to the other, shows the feed and the report |
 
 Transport is separated from parsing deliberately. `canary.py` and `witness.py` own the
 serial port and the subprocess and are not unit-tested; everything they emit is parsed by

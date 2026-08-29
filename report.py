@@ -86,14 +86,12 @@ def write_csv(incidents, out):
         ])
 
 
-def main():
-    ap = argparse.ArgumentParser(description="BlueSentinel report")
-    ap.add_argument("--canary", default="logs/canary.jsonl")
-    ap.add_argument("--witness", default="logs/witness.jsonl")
-    ap.add_argument("--format", choices=("table", "json", "csv"), default="table")
-    args = ap.parse_args()
+def summarize(canary, witness):
+    """Incidents, plus the scanners that only ever looked.
 
-    canary, witness = load(args.canary), load(args.witness)
+    Shared with tui.py so the live view and the CLI can never disagree about
+    what counts as a scanner.
+    """
     incidents = parse.incidents(canary, witness)
     # A device that connected is an incident, not a passing scanner. Listing it
     # under "scanned but did not connect" would make that heading a lie.
@@ -101,6 +99,17 @@ def main():
                  for a in (inc["initiator"], inc["canary_peer"]) if a}
     scans = [(a, n) for a, n in parse.scan_summary(witness)
              if a.lower() not in connected]
+    return incidents, scans
+
+
+def main():
+    ap = argparse.ArgumentParser(description="BlueSentinel report")
+    ap.add_argument("--canary", default="logs/canary.jsonl")
+    ap.add_argument("--witness", default="logs/witness.jsonl")
+    ap.add_argument("--format", choices=("table", "json", "csv"), default="table")
+    args = ap.parse_args()
+
+    incidents, scans = summarize(load(args.canary), load(args.witness))
 
     if args.format == "json":
         json.dump({"incidents": incidents, "scanners": scans}, sys.stdout, indent=2)

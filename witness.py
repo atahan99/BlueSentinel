@@ -67,6 +67,19 @@ def capture(nrfutil, port, address, pcap, duration=0):
     never a data loss -- conversion happens afterwards from the file.
     """
     os.makedirs(os.path.dirname(pcap) or ".", exist_ok=True)
+    # Drop the previous capture's anchor before overwriting its pcap. It is
+    # only valid for the file it was written beside, and while this capture is
+    # running any conversion of the growing pcap -- which is how the console
+    # shows a live report -- would otherwise correct the new frames against the
+    # old run's end time. Measured: a stale anchor put the witness 35 minutes
+    # from the canary, so every incident missed its profile window and landed
+    # under "unattributed" with the two radios never merging. No anchor yields
+    # offset 0.0 and uncorrected timestamps, which is honest and close; a stale
+    # one is confidently wrong, and nothing about the output looks broken.
+    try:
+        os.remove(pcap + ".end")
+    except FileNotFoundError:
+        pass
     cmd = [nrfutil, "ble-sniffer", "sniff", "--port", port,
            "--follow", address, "--output-pcap-file", pcap]
     print("$ " + " ".join(cmd), file=sys.stderr, flush=True)
@@ -129,14 +142,45 @@ def convert(tshark, pcap, address, out_path):
 
     # Collect first, write second: correcting the sniffer clock offset needs
     # the last frame's timestamp, which is only known once the stream ends.
-    events, last = [], None
+    events, last, backwards = [], None, 0
     for rec in parse.ek_records(proc.stdout):
         epoch = parse.ek_epoch(rec)
         if epoch is not None:
-            last = epoch if last is None else max(last, epoch)
+            if last is not None and epoch < last - 0.5:
+                backwards += 1
+            # File order, not max(). Some captures hold two frame streams --
+            # the real --follow capture plus a sparse one whose timestamps run
+            # far past the end of the run (docs/hardware-notes.md §1). The
+            # maximum timestamp then belongs to that second stream and is not
+            # when this capture ended: measured at 68 minutes past the end of a
+            # 200-second run. Anchoring there shifts every event by the size of
+            # the overshoot, which puts the two radios more than
+            # CONNECT_MERGE_SECONDS apart, and every connection is reported
+            # twice -- once per radio, ATT ops on one copy, RSSI on the other.
+            # Nothing looks broken; the report just doubles. The last frame in
+            # file order is the true end, and the only one whose timestamp can
+            # be checked against the moment the capture stopped.
+            last = epoch
         event = parse.witness_event(rec, address)
         if event:
             events.append((epoch, event))
+
+    # A capture only ever moves forward. If it does not, this file holds more
+    # than one stream: something else opened the dongle while nrfutil was
+    # capturing and its frames ended up here too. Measured once -- a `tshark -D`
+    # status poll every three seconds ran the nRF extcap shim against the busy
+    # dongle, and the pcap came out holding two whole captures of the same
+    # session, one of them advertising-only. Nothing about that file looks
+    # wrong: it opens fine and every frame is valid. But the seam between the
+    # two streams reads as a several-minute clock jump, which drags the anchor
+    # below and pushes the two radios far enough apart that no incident merges.
+    # Say so rather than reporting correlated-looking nonsense.
+    if backwards:
+        print("warning: %s is not monotonic (%d backward time step%s). It very "
+              "likely holds more than one capture -- check that nothing else "
+              "opened the sniffer while this ran. Timestamps and attribution "
+              "from this file are unreliable."
+              % (pcap, backwards, "" if backwards == 1 else "s"), file=sys.stderr)
 
     offset = parse.clock_offset(last, capture_end(pcap))
     with open(out_path, "w") as fh:

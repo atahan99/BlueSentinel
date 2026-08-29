@@ -255,12 +255,6 @@ def iso(epoch):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (int(epoch * 1000) % 1000)
 
 
-def ek_timestamp(rec):
-    """ISO8601 UTC for one record, unscaled. See linear_time_map for why raw
-    sniffer timestamps usually need correcting first."""
-    return iso(ek_epoch(rec))
-
-
 def clock_offset(last_frame, capture_end):
     """Seconds to add to sniffer timestamps to put them on the host's clock.
 
@@ -272,8 +266,17 @@ def clock_offset(last_frame, capture_end):
     slope to the endpoints assumes a drift that is not there and smears every
     event across the capture window.
 
-    Anchored on the last frame against the file's mtime, since the last frame
-    is written immediately before the file is closed.
+    Anchor it on the *last frame in file order* against the moment the capture
+    stopped (witness.capture_end, never the file's mtime, which any copy or
+    checkout rewrites). Never on max(): some captures hold a second, sparse
+    frame stream whose timestamps run well past the end of the run -- 68
+    minutes past, on a 200-second capture -- so the largest timestamp in the
+    file belongs to that stream and is not when this capture ended. Anchoring
+    there shifts every event by the size of the overshoot, far enough to push
+    the two radios past CONNECT_MERGE_SECONDS, and every connection is then
+    reported twice, once per radio, with the ATT ops on one copy and the RSSI
+    on the other. witness.convert warns when it sees such a file.
+    See docs/hardware-notes.md §1; the 71 minutes above may be the same effect.
 
     Without this the witness log lands over an hour from the canary log, every
     event falls outside its true profile window, and attribution silently

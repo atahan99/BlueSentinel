@@ -5,8 +5,9 @@ block below is verbatim output from a real command; failures are recorded with t
 intact, and nothing is reconstructed from general knowledge.
 
 **Host:** Mac16,5 (M4 Max), macOS 26.6 (25G72), Darwin 25.6.0 arm64, Python 3.13.3.
-**Date:** 2026-08-04. Third-party addresses are redacted; the bait's own address is not
-secret and is left intact, since the witness has to be configured with it.
+**Date:** 2026-08-04, with later findings dated inline (latest 2026-08-29). Third-party
+addresses are redacted; the bait's own address is not secret and is left intact, since the
+witness has to be configured with it.
 
 ## Current state
 
@@ -90,8 +91,64 @@ would silently break a reimplementation.
   hours. Uncorrected, every witness event fell outside its
   true profile window and the correlator credited all incidents to whichever profile was
   live last — with well-formed JSONL throughout.
+
+  **Re-examine this.** *(2026-08-30.)* The two-stream finding below produces the same
+  numbers — a span of 68 minutes for a 200 s capture — without any clock being wrong, and
+  it was not known about when the offset above was measured. Whether this board's clock is
+  genuinely offset, or whether that reading was the seam between two streams all along, has
+  not been settled. A capture verified to hold a single block would settle it.
 - **Extcap default mode captured 7 packets in 25 s where `nrfutil --follow` captured 6163
   in 40 s** on the same radio.
+- **A pcap can contain two frame streams, and the seam reads as a clock offset.**
+  *(2026-08-29/30.)* Some captures from `nrfutil ble-sniffer sniff` come out holding two
+  separate streams written as two blocks, both starting at the moment the capture started:
+
+  ```
+  200 s run, --duration 200:
+    sparse   frames     1-5544   23:06:49 -> 00:14:51   5544 fr    1.4/s     0 ATT
+    dense    frames  5545-26460  23:06:49 -> 23:10:09  20916 fr  104.8/s   101 ATT
+  400 s run:
+    sparse   frames     1-5283   15:10:10 -> 15:14:42   5283 fr   19.0/s     0 ATT
+    dense    frames  5284-43352  15:10:10 -> 15:14:32  38069 fr  145.0/s   120 ATT
+  ```
+
+  The dense block is the real `--follow` capture — its span matches the requested duration
+  to a fraction of a second. The sparse block carries no ATT at all and its timestamps are
+  stretched: 5544 frames spread over 68 minutes for a capture that ran 200 seconds.
+
+  **This is what the "71-minute offset" above is measuring.** `max(timestamp) -
+  min(timestamp)` across such a file reads 68 minutes for a 200 s capture, which is the
+  same shape as the 78-minutes-for-389 s recorded on 2026-08-04. The last frame *in file
+  order* is correct (23:10:09, the true end); only the maximum is not. So anchor the clock
+  correction on file order, never on `max()` — `witness.py` does, and the difference showed
+  up as every incident being reported twice, once per radio, with the ATT ops on one copy
+  and the RSSI on the other.
+
+  ATT counts are unaffected: every ATT frame is in the dense block.
+
+  **Cause not established.** Contention for the radio was the first suspicion — a
+  three-second `tshark -D` poll runs the extcap shim, which opens the dongle to identify
+  it, and four shim processes were observed against it at once during a live capture. But a
+  later run with no `tshark -D` anywhere produced the same two blocks, so that is at most a
+  contributing factor and not the cause. Note that `nrfutil` runs three processes that all
+  carry `--output-pcap-file`, which is the obvious thing to look at next. Not every capture
+  is affected: some come out as a single clean block, as does the 2026-08-04 sample.
+  `witness.py` warns on any backward time step rather than correlating the result silently.
+- **`tshark -D` cannot see the sniffer while the sniffer is busy.** Same cause from the
+  other side: once `nrfutil` holds the port, the shim cannot open it, and the interface
+  vanishes from the listing entirely. Anything polling `-D` for presence therefore reports
+  the dongle as unplugged during exactly the window it is working. Presence is read from
+  USB enumeration instead — VID `0x1915`, PID `0x522A` — the same way the bait's CP210x is
+  found. The interface *name* still comes from `-D`, but only once, before a capture starts.
+- **The pcap can be read while the capture is still running** *(2026-08-29; previously
+  listed as unverified in §7)*. `tui.py` re-derives the incident table from the growing
+  file every 30 s and the frames written so far parse normally. Two caveats, both real: the
+  capture-end anchor does not exist until the capture stops, so a mid-run conversion is
+  uncorrected — and the previous run's anchor must be cleared when a new capture starts, or
+  fresh frames are corrected against an old run's end time. Measured at 35 minutes off,
+  which put every incident outside its profile window and filed them all under
+  "unattributed". The pcap remains the source of truth; the authoritative conversion still
+  happens after the capture stops.
 
 ### Tooling
 
@@ -334,9 +391,12 @@ Save your work before flashing. It is a one-time step.
 
 ## 7. Still unverified
 
-- Whether the pcap is flushed incrementally enough to read while capture is running. The
-  design does not depend on it — conversion happens afterwards, and `--convert` can
-  re-derive at any time.
+- What produces the second, sparse frame stream that some captures contain (§1). Radio
+  contention is ruled out as the sole cause. `nrfutil` runs three processes all carrying
+  `--output-pcap-file`; whether more than one of them writes has not been checked.
+- Whether this board's pcap clock is genuinely offset from host time at all, or whether the
+  2026-08-04 measurement was the seam between two streams (§1). Needs a capture verified to
+  hold a single block, compared against the canary log.
 - Whether a BLE peer writing `+++` can reach the AT parser on 0.6.2 (§1). Moot in practice
   now that 0.9.0 is installed.
 - Whether the sniffer drops packets under load on this USB topology; both devices sit
