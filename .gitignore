@@ -7,3 +7,4 @@ venv/
 !docs/sample-capture.pcapng
 .pytest_cache/
 .DS_Store
+.claude/
