@@ -1,41 +1,22 @@
 #!/usr/bin/env python3
 """Non-interactive AT command probe for the Bluefruit LE Friend.
 
-Send commands, print whatever comes back, verbatim. Useful for checking what
-your firmware actually supports before believing any documentation about it --
-the AT command set differs substantially between firmware versions, and both
-this project's design and its bugs came from probing rather than assuming.
+Send commands, print whatever comes back, verbatim. Check what your firmware
+supports before trusting any documentation: the command set differs a lot
+between versions (docs/hardware-notes.md §2).
 
     python3 tools/at_probe.py --commands ATI 'AT+HELP'
 
-The slide switch must be on CMD. If every command times out, that is the most
-likely cause -- far more likely than a broken device.
+The slide switch must be on CMD; if every command times out, that is the most
+likely cause.
 """
 import argparse
 import os
 import sys
 import time
 
-import serial
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from canary import find_port  # noqa: E402  -- one source of truth for discovery
-
-
-def send(ser, cmd, timeout):
-    """Send one command, return the raw reply text. Stops on OK/ERROR."""
-    ser.reset_input_buffer()
-    ser.write((cmd + "\r\n").encode())
-    ser.flush()
-    out, deadline = [], time.time() + timeout
-    while time.time() < deadline:
-        line = ser.readline().decode("utf-8", "replace")
-        if not line:
-            continue
-        out.append(line)
-        if line.strip() in ("OK", "ERROR"):
-            break
-    return "".join(out)
+from canary import Canary, find_port  # noqa: E402  -- one serial path
 
 
 def main():
@@ -55,13 +36,14 @@ def main():
     print("# baud:    %d, 8N1, rtscts" % args.baud)
     print("# probed:  %s" % time.strftime("%Y-%m-%dT%H:%M:%S%z"))
 
-    with serial.Serial(port, args.baud, rtscts=True, timeout=0.5) as ser:
-        time.sleep(0.5)  # the nRF51 drops bytes sent immediately after open
-        ser.reset_input_buffer()
+    dev = Canary(port, baud=args.baud, timeout=args.timeout)
+    try:
         for cmd in args.commands:
             print("\n$ %s" % cmd)
-            reply = send(ser, cmd, args.timeout)
+            reply = dev.cmd(cmd)
             print(reply if reply else "<no response within %.1fs>" % args.timeout)
+    finally:
+        dev.close()
 
 
 if __name__ == "__main__":

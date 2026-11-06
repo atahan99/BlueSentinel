@@ -3,11 +3,9 @@
 
 Transport only. All parsing lives in parse.py.
 
-Written against Bluefruit firmware 0.6.2 / S110 8.0.0 -- the AT command set was
-probed, not assumed (docs/hardware-notes.md). Notably this firmware has no
-command that reports a connected peer's address, so identifying the prober is
-entirely the witness's job. The canary reports that *something* connected, how
-strong it was, and which bait was live at the time.
+Written against firmware 0.6.2 and 0.9.0; the AT command set was probed, not
+assumed (docs/hardware-notes.md §2). 0.6.2 cannot name a connected peer, so
+identifying the prober falls to the witness.
 """
 import argparse
 import datetime
@@ -25,29 +23,43 @@ import parse
 CP210X = (0x10C4, 0xEA60)  # Silicon Labs CP2102N on the Bluefruit LE Friend
 RESET_SETTLE = 2.0  # seconds for the nRF51 to come back after ATZ
 
-# Firmware 0.6.2 caps the advertising timeout at 180s and silently rejects 0
-# ("no timeout") while still answering OK -- verified, see hardware-notes.md.
-# The bait therefore goes dark on its own and has to be kicked back on the air.
+# 0.6.2 caps advertising at 180 s and rejects 0 while answering OK, so the bait
+# goes dark on its own and must be kicked (docs/hardware-notes.md §1).
 ADV_TIMEOUT = 180
 
-# Emitted on every poll while a peer is connected -- useful in the log, noise on
-# a terminal. Everything still reaches logs/canary.jsonl.
-QUIET = {"rssi"}
+QUIET = {"rssi"}  # logged every poll while connected; noise on a terminal
 
 
 def find_port(ids=CP210X):
     """First serial port matching a (vid, pid), or None. Never hardcode a path.
 
-    On macOS this yields /dev/cu.* -- pyserial lists the callout node, which is
-    the one you want; opening /dev/tty.* blocks on carrier detect and hangs.
-
-    Defaults to the bait's CP210x. tui.py passes the sniffer's ids to ask the
-    same question about the other radio, so the two do not drift apart.
+    On macOS pyserial lists /dev/cu.*, the right node: /dev/tty.* blocks on
+    carrier detect. tui.py passes the sniffer's ids to reuse this.
     """
     for p in list_ports.comports():
         if (p.vid, p.pid) == ids:
             return p.device
     return None
+
+
+def new_run(root="logs"):
+    """Create root/<UTC YYYYmmdd-HHMMSS>[-N] and atomically repoint root/latest
+    at it. The link target is relative so the logs folder stays relocatable."""
+    base = os.path.join(root, time.strftime("%Y%m%d-%H%M%S", time.gmtime()))
+    run, n = base, 1
+    while True:
+        try:
+            os.makedirs(run)
+            break
+        except FileExistsError:
+            n += 1
+            run = "%s-%d" % (base, n)
+    tmp = os.path.join(root, ".latest-%d" % os.getpid())
+    if os.path.lexists(tmp):
+        os.remove(tmp)
+    os.symlink(os.path.basename(run), tmp)
+    os.replace(tmp, os.path.join(root, "latest"))
+    return run
 
 
 def now():
@@ -59,7 +71,8 @@ def now():
 
 class Canary:
     def __init__(self, port, baud=9600, timeout=3.0):
-        self.ser = serial.Serial(port, baud, rtscts=True, timeout=0.5)
+        # exclusive: a second canary on the same port would interleave AT replies.
+        self.ser = serial.Serial(port, baud, rtscts=True, timeout=0.5, exclusive=True)
         self.timeout = timeout
         time.sleep(0.5)  # the nRF51 drops bytes sent immediately after open
         self.ser.reset_input_buffer()
@@ -101,19 +114,10 @@ def load_profiles(directory):
 def apply_profile(dev, profile):
     """Apply an identity: set the name, reset, set the payload, advertise.
 
-    AT+GAPDEVNAME only takes effect after an ATZ, so the reset is the normal
-    path here rather than an error branch. The payload is written after the
-    reset so a reset can never discard it.
-
-    Keep the serial connection open across rotations. Reopening the port
-    toggles DTR, which resets the nRF51 -- a per-rotation reconnect makes the
-    advertised payload lag one profile behind, and every AT command still
-    answers OK while it happens. The only way to see it is off the air.
-
-    Verified on a sniffer: all six shipped profiles advertise their own service
-    UUIDs during their own dwell window. See docs/hardware-notes.md.
-
-    Returns the AT statuses for logging so a rejected payload is visible.
+    AT+GAPDEVNAME only takes effect after ATZ; the payload goes after the reset
+    so it cannot be discarded. Never reopen the port per rotation: DTR resets
+    the nRF51 and the payload lags one profile (docs/hardware-notes.md §1).
+    Returns the AT statuses so a rejected payload is visible in the log.
     """
     replies = {"stop": dev.cmd("AT+GAPSTOPADV")}
     replies["name"] = dev.cmd("AT+GAPDEVNAME=" + profile["name"])
@@ -122,9 +126,8 @@ def apply_profile(dev, profile):
     dev.ser.reset_input_buffer()
     if profile.get("advdata"):
         replies["advdata"] = dev.cmd("AT+GAPSETADVDATA=" + profile["advdata"])
-    # AT+GAPAUTOADV is 1 on this firmware, so the device is already advertising
-    # by now and AT+GAPSTARTADV would return ERROR. Stop first so the start is
-    # deterministic and an ERROR in the log means something is actually wrong.
+    # AT+GAPAUTOADV=1: already advertising, so a bare start would ERROR.
+    # Stop first so an ERROR in the log is real (docs/hardware-notes.md §1).
     replies["stop_after_reset"] = dev.cmd("AT+GAPSTOPADV")
     replies["start"] = dev.cmd("AT+GAPSTARTADV")
     return {k: parse.status(v) for k, v in replies.items()}
@@ -146,26 +149,24 @@ class Log:
 
 
 def run_session(dev, log, profiles, args):
-    """One serial session. Returns when the device goes away, so the caller
-    can reconnect. Rotation state is intentionally not preserved across
-    reconnects -- restarting from the first profile is honest and simpler."""
+    """One serial session. Returns only when --duration is reached; a lost
+    device raises SerialException/OSError, which main() catches to reconnect.
+    Rotation restarts from the first profile after a reconnect."""
     info = parse.device_info(dev.cmd("ATI"))
     addr = parse.at_reply("AT+BLEGETADDR", dev.cmd("AT+BLEGETADDR"))[0]
     addr = addr[0] if addr else None
     addr_type = parse.at_reply("AT+BLEGETADDRTYPE", dev.cmd("AT+BLEGETADDRTYPE"))[0]
 
-    # Ask for advertising that never times out. 0.9.0 honours it; 0.6.2 refuses
-    # 0 while still answering OK, so the read-back below is what decides whether
-    # the keepalive is needed. Never trust the status here.
+    # Ask for no advertising timeout. 0.6.2 refuses 0 but answers OK, so the
+    # read-back, never the status, decides whether the keepalive is needed.
     dev.cmd("AT+GAPINTERVALS=,,,0")
     timeout = parse.adv_timeout(dev.cmd("AT+GAPINTERVALS"))
     if timeout != 0:
         dev.cmd("AT+GAPINTERVALS=,,,%d" % ADV_TIMEOUT)
         timeout = parse.adv_timeout(dev.cmd("AT+GAPINTERVALS"))
 
-    # Deny mode switching from the BLE side, so a prober writing +++ to the UART
-    # characteristic cannot reach the AT parser and issue e.g. AT+FACTORYRESET.
-    # Only exists from 0.9.0; ERROR on 0.6.2 leaves the exposure open.
+    # Stop a peer writing +++ from reaching the AT parser. 0.9.0 only; ERROR on
+    # 0.6.2 leaves the exposure open (docs/hardware-notes.md §1).
     modeswitch = parse.status(dev.cmd("AT+MODESWITCHEN=0"))
 
     log.write("advertising_start", address=addr,
@@ -175,16 +176,21 @@ def run_session(dev, log, profiles, args):
     print("\n  bait address: %s   <-- point the witness at this\n" % addr,
           file=sys.stderr, flush=True)
 
-    connected = False
+    connected, prev = False, None
     stop_at = time.time() + args.duration if args.duration else None
     while True:
         for profile in profiles:
             if stop_at and time.time() >= stop_at:
                 log.write("stopped", reason="duration reached")
                 return
+            if connected:
+                # The ATZ in apply_profile drops the link; attribute it to the
+                # profile the prober actually saw, not the next one.
+                log.write("disconnect", profile=prev, reason="rotation")
+                connected = False
             status = apply_profile(dev, profile)
-            # Re-read the address after every rotation. If this ever changes,
-            # the witness has been following the wrong device since the switch.
+            prev = profile["id"]
+            # If this ever changes, the witness is following the wrong device.
             after = parse.at_reply("AT+BLEGETADDR", dev.cmd("AT+BLEGETADDR"))[0]
             after = after[0] if after else None
             if after != addr:
@@ -200,9 +206,8 @@ def run_session(dev, log, profiles, args):
                 deadline = min(deadline, stop_at)
             last_adv = time.time()
             while time.time() < deadline:
-                # Kick advertising before the firmware's timeout expires, or the
-                # bait sits silent for the rest of the dwell and catches nothing.
-                # Skipped entirely when the firmware accepted "never time out".
+                # Kick advertising before the firmware times it out; skipped when
+                # the firmware accepted "never time out".
                 if timeout != 0 and time.time() - last_adv >= args.readvertise:
                     dev.cmd("AT+GAPSTOPADV")
                     log.write("readvertise", profile=profile["id"],
@@ -236,7 +241,8 @@ def main():
     ap = argparse.ArgumentParser(description="BlueSentinel canary (the bait)")
     ap.add_argument("--port", help="override CP210x auto-discovery")
     ap.add_argument("--profiles", default="profiles")
-    ap.add_argument("--log", default="logs/canary.jsonl")
+    ap.add_argument("--dir", help="run folder (default: a new logs/<UTC time>, "
+                    "linked as logs/latest)")
     ap.add_argument("--dwell", type=float, default=900,
                     help="seconds per profile (default 900; below ~300 the "
                          "device looks broken rather than interesting)")
@@ -251,28 +257,31 @@ def main():
     args = ap.parse_args()
 
     profiles = load_profiles(args.profiles)
-    log = Log(args.log)
-
-    while True:
-        port = args.port or find_port()
-        if not port:
-            print("waiting for CP210x (VID 0x10C4 PID 0xEA60)...", file=sys.stderr)
-            time.sleep(5)
-            continue
-        dev = None
-        try:
-            dev = Canary(port)
-            run_session(dev, log, profiles, args)
-            return  # run_session only returns when --duration is reached
-        except (serial.SerialException, OSError) as e:
-            log.write("serial_error", error=str(e))
-            time.sleep(5)  # USB dropped; loop re-discovers the port
-        except KeyboardInterrupt:
-            log.write("stopped")
-            return
-        finally:
-            if dev:
-                dev.close()
+    if args.dir:
+        os.makedirs(args.dir, exist_ok=True)
+    run = args.dir or new_run()
+    print("run folder: %s" % run, file=sys.stderr, flush=True)
+    log = Log(os.path.join(run, "canary.jsonl"))
+    try:
+        while True:
+            port = args.port or find_port()
+            if not port:
+                print("waiting for CP210x (VID 0x10C4 PID 0xEA60)...", file=sys.stderr)
+                time.sleep(5)
+                continue
+            dev = None
+            try:
+                dev = Canary(port)
+                run_session(dev, log, profiles, args)
+                return  # run_session only returns when --duration is reached
+            except (serial.SerialException, OSError) as e:
+                log.write("serial_error", error=str(e))
+                time.sleep(5)  # USB dropped; loop re-discovers the port
+            finally:
+                if dev:
+                    dev.close()
+    except KeyboardInterrupt:  # also covers the 5 s waits
+        log.write("stopped")
 
 
 if __name__ == "__main__":

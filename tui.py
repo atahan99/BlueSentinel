@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 """One screen that runs the whole rig: both radios, the live feed, the report.
 
-Supervisor only. It spawns canary.py and witness.py as subprocesses and reads
-what they already write to disk -- logs/canary.jsonl is the canary's machine
-interface, and witness.py's --convert path is offline and idempotent. Nothing
-here re-implements serial, sniffer or parsing logic, and none of the four
-existing scripts had to change to support it (beyond report.summarize being
-lifted out of report.main so both views count scanners the same way).
+Supervisor only: it creates a run folder (logs/<run>/), spawns canary.py and
+witness.py into it, and reads what they write there. No serial, sniffer or
+parsing logic lives here.
 
-The point of the whole thing is the address handoff. The canary picks its
-advertising address at runtime and the witness has to be told it; doing that by
-eye between two terminals is the one step that silently ruins a run, because a
-witness following the wrong address captures a perfectly valid pcap of nothing.
-Here the canary's own log announces the address and the witness is started from
-it, including after an unexpected address_changed.
-
-Stdlib curses on purpose: the project's dependency list is pyserial and pytest,
-and a live view is not worth a third entry.
+The point is the address handoff: the canary announces its address in its log
+and the witness is started from it. A witness on the wrong address captures a
+valid pcap of nothing. Stdlib curses so the dependency list stays short.
 """
 import argparse
 import collections
 import contextlib
 import curses
+import glob
 import io
 import json
 import os
@@ -38,42 +30,29 @@ import witness
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LOGS = os.path.join(ROOT, "logs")
-CANARY_LOG = os.path.join(LOGS, "canary.jsonl")
-WITNESS_LOG = os.path.join(LOGS, "witness.jsonl")
-PCAP = os.path.join(LOGS, "witness.pcapng")
 
 PROBE_INTERVAL = 3.0     # seconds between USB presence checks
 AUTO_REFRESH = 30.0      # seconds between background report rebuilds
 FEED_MAX = 500           # feed lines kept in memory; the JSONL keeps everything
+WITNESS_RETRY = 10.0     # seconds between witness restarts
 STOP_GRACE = 20.0        # seconds a collector gets to shut down on its own
-# Generous on purpose: on SIGINT the witness kills nrfutil, then converts the
-# whole pcap before exiting, and that scales with capture size. Escalating
-# through it would kill a conversion mid-write. The canary exits immediately,
-# so this only ever costs time when there is real work to wait for.
+# Generous: on SIGINT the witness stops nrfutil and converts before exiting;
+# escalating early would kill that conversion mid-write.
 
 
 # --- probing -----------------------------------------------------------------
 
-NRF_SNIFFER = (0x1915, 0x522A)  # Nordic nRF52840 Dongle running sniffer firmware
 
 
 def probe_ports():
     """Which radios are on the bus right now, as {name: port or None}.
 
-    USB enumeration rather than witness.find_sniffer, and not as a shortcut.
-    `tshark -D` only lists the sniffer by running the extcap shim, which opens
-    the dongle to ask what it is -- so once nrfutil is capturing and holds the
-    port, the interface vanishes from the list. A status poll built on that
-    reports the dongle as unplugged during exactly the window where it is
-    working, which is worse than not showing it at all. Presence is a property
-    of the bus, not of who has the port open.
-
-    The extcap interface *name* is still witness.py's business; it discovers
-    its own and does not need one from here.
+    USB enumeration, not `tshark -D`: the sniffer vanishes from -D while it is
+    capturing (docs/hardware-notes.md §1, "The sniffer").
     """
     try:
         return {"canary": canary.find_port(),
-                "witness": canary.find_port(NRF_SNIFFER)}
+                "witness": canary.find_port(witness.NRF_SNIFFER)}
     except OSError:
         return {"canary": None, "witness": None}
 
@@ -98,12 +77,8 @@ class Tail:
         self.buf = ""
 
     def read(self):
-        """Records completed since the last call.
-
-        Buffered by line rather than read line-at-a-time: the canary flushes
-        per record, but a read can still land mid-line, and half a JSON object
-        must be held rather than dropped.
-        """
+        """Records completed since the last call. A read can land mid-line,
+        so half a JSON object is held, not dropped."""
         if not self.fh:
             return []
         out = []
@@ -121,11 +96,8 @@ class Tail:
 
 def bait_address(records, current):
     """The address the witness should be following, given new canary records.
-
-    Both events matter. advertising_start is the normal handoff; the canary
-    also emits address_changed if a rotation ever moves the address, which
-    means an already-running witness is now watching a device that no longer
-    exists. Last one wins -- these arrive in order.
+    advertising_start is the normal handoff; address_changed means a running
+    witness now watches a device that no longer exists. Last one wins.
     """
     for rec in records:
         data = rec.get("data") or {}
@@ -139,30 +111,18 @@ def bait_address(records, current):
 # --- process control ---------------------------------------------------------
 
 def spawn(argv, stderr_path):
-    """Start a collector with its output pinned to a file.
-
-    Both collectors print to stdout and stderr. Left alone that lands on top of
-    the curses screen and corrupts it, so it goes to a file that the status bar
-    quotes the tail of -- an error still reaches you, it just does not eat the
-    display.
-
-    start_new_session so the whole thing can be signalled as a group.
-    """
-    fh = open(stderr_path, "ab", buffering=0)
-    return subprocess.Popen([sys.executable] + argv, cwd=ROOT,
-                            stdin=subprocess.DEVNULL, stdout=fh, stderr=fh,
-                            start_new_session=True)
+    """Start a collector with stdout/stderr in a file (it would corrupt the
+    curses screen; the status bar quotes its tail), in its own process group."""
+    with open(stderr_path, "ab", buffering=0) as fh:  # the child keeps its own copy
+        return subprocess.Popen([sys.executable] + argv, cwd=ROOT,
+                                stdin=subprocess.DEVNULL, stdout=fh, stderr=fh,
+                                start_new_session=True)
 
 
 def stop(proc):
-    """Shut a collector down the way Ctrl-C would, then insist.
-
-    SIGINT first, and not as politeness: it is the only signal either collector
-    handles usefully. The canary logs a `stopped` event on it, and the witness
-    converts its pcap and writes the .end anchor that parse.clock_offset needs
-    to put sniffer timestamps on the host's clock. A plain SIGTERM skips both,
-    leaving a capture whose events land an hour from the canary's.
-    """
+    """Shut a collector down the way Ctrl-C would, then insist. SIGINT first:
+    only on it does the canary log `stopped` and the witness write the .end
+    clock anchor (docs/hardware-notes.md §1, "The sniffer")."""
     if not proc or proc.poll() is not None:
         return
     pgid = os.getpgid(proc.pid)
@@ -192,6 +152,12 @@ def running(proc):
     return proc is not None and proc.poll() is None
 
 
+def pcap_bytes(run_dir):
+    """Total size of the run's witness segments."""
+    return sum(os.path.getsize(p) for p in
+               glob.glob(os.path.join(run_dir or "", "witness-*.pcapng")))
+
+
 # --- state -------------------------------------------------------------------
 
 class App:
@@ -199,19 +165,22 @@ class App:
         self.args = args
         self.canary = None
         self.witness = None
-        # Seed from the log of the last run, so opening the console after the
-        # fact can still convert and attribute an existing pcap. Without this
-        # the address is only ever learned live, and a report built between
-        # runs silently omits everything the witness saw.
-        self.address = bait_address(report.load(CANARY_LOG), None)
+        self.witness_started = 0.0
+        # Seed from the last run so 'r' can still rebuild its report; without
+        # the address its pcap cannot be converted.
+        self.run_dir = self.address = None
+        latest = os.path.join(LOGS, "latest")
+        if os.path.exists(latest):
+            self.run_dir = os.path.realpath(latest)
+            self.address = bait_address(
+                report.load(os.path.join(self.run_dir, "canary.jsonl")), None)
         self.witness_address = None   # what the running witness was told
-        self.tail = Tail(CANARY_LOG)
+        self.tail = None
         self.feed = collections.deque(maxlen=FEED_MAX)
         self.report_lines = []
-        # Probed once here as well as on the worker: enumeration is a few
-        # milliseconds, and without it the first frame claims both radios are
-        # unplugged until the worker's first pass lands.
+        # Probed here too, or the first frame shows both radios unplugged.
         self.ports = probe_ports()
+        self.last_probe = self.last_refresh = 0.0
         self.device = {}              # ATI fields, once the canary reports them
         self.note = ""
         self.mode = "feed"
@@ -225,21 +194,25 @@ class App:
     def start(self):
         if running(self.canary):
             return
+        self.run_dir = canary.new_run(LOGS)
+        self.address = None   # the previous run's address is not this bait's
+        self.tail = Tail(os.path.join(self.run_dir, "canary.jsonl"))
         self.tail.open_at_end()
-        argv = ["canary.py", "--dwell", str(self.args.dwell)]
+        argv = ["canary.py", "--dir", self.run_dir, "--dwell", str(self.args.dwell)]
         if self.args.duration:
             argv += ["--duration", str(self.args.duration)]
         if self.args.port:
             argv += ["--port", self.args.port]
-        self.canary = spawn(argv, os.path.join(LOGS, "canary.stderr"))
+        self.canary = spawn(argv, os.path.join(self.run_dir, "canary.stderr"))
         self.note = "canary started"
 
     def start_witness(self):
         """Only ever called with an address the canary has actually announced."""
-        argv = ["witness.py", self.address]
+        argv = ["witness.py", self.address, "--dir", self.run_dir]
         if self.args.duration:
             argv += ["--duration", str(self.args.duration)]
-        self.witness = spawn(argv, os.path.join(LOGS, "witness.stderr"))
+        self.witness = spawn(argv, os.path.join(self.run_dir, "witness.stderr"))
+        self.witness_started = time.time()
         self.witness_address = self.address
         self.note = "witness following %s" % self.address
 
@@ -254,13 +227,10 @@ class App:
     def pump(self):
         """Drain the canary's log and act on it. Runs on the draw thread; it
         only touches files that are already open, so it cannot block."""
-        records = self.tail.read()
+        records = self.tail.read() if self.tail else []
         for rec in records:
-            # canary.QUIET, not a list of our own: the canary already decided
-            # which events are noise on a terminal and suppresses them from its
-            # own stdout. Reading the JSONL instead of its stdout must not undo
-            # that -- a connection is otherwise scrolled away by its own
-            # per-poll RSSI readings. The file still keeps every one of them.
+            # canary.QUIET: the canary's own idea of terminal noise, so per-poll
+            # RSSI does not scroll a connection away. The file keeps them all.
             if rec.get("event") not in canary.QUIET:
                 self.feed.append(parse.format_event(rec))
             if rec.get("event") == "advertising_start":
@@ -270,11 +240,16 @@ class App:
         self.address = bait_address(records, self.address)
 
         if self.address and not running(self.witness) and running(self.canary):
-            self.start_witness()
+            # Backoff: a witness that dies at startup (sniffer busy or missing)
+            # was otherwise respawned on every frame, five times a second.
+            if time.time() - self.witness_started >= WITNESS_RETRY:
+                died = self.witness is not None
+                self.start_witness()
+                if died:
+                    self.note = "witness exited, restarting: %s" % tail_file(
+                        os.path.join(self.run_dir, "witness.stderr"))
         elif self.address != before and running(self.witness):
-            # Deliberately not restarted here: killing the witness to re-follow
-            # would end the capture mid-run. Say it loudly instead and let the
-            # operator decide -- 'w' restarts it.
+            # Not restarted automatically; the operator decides with 'w'.
             self.note = ("address changed to %s; witness still on %s -- press w"
                          % (self.address, self.witness_address))
 
@@ -287,58 +262,60 @@ class App:
             self.note = "run finished"
 
     def refresh(self):
-        """Rebuild the incident table, converting the live pcap first.
+        """Rebuild the incident table, converting the run's segments first.
 
-        witness.py writes a pcap continuously but only converts when it stops,
-        which is why a running report shows `att 0`. Its --convert path is
-        offline and rewrites the JSONL from scratch, so it is safe to run
-        against a capture still being appended to: it simply sees the frames
-        written so far.
+        The witness only converts when it stops; converting here is what makes
+        a live report show ATT ops. live=True anchors the unfinished segment's
+        clock on now, since it has no .end yet.
         """
-        if self.address and os.path.exists(PCAP):
-            # convert() reports trouble -- a non-monotonic capture above all --
-            # by printing to stderr, which is right for the CLI and would paint
-            # over the curses screen here. Catch it and give it the status line.
+        if not self.run_dir:
+            return
+        if self.address:
+            # convert prints warnings to stderr, which would paint over curses.
             said = io.StringIO()
             try:
                 with contextlib.redirect_stderr(said):
                     tshark = witness.find_binary("tshark",
                                                  witness.TSHARK_FALLBACKS,
                                                  "--tshark")
-                    witness.convert(tshark, PCAP, self.address, WITNESS_LOG)
+                    witness.convert_run(tshark, self.run_dir, self.address,
+                                        live=running(self.witness))
             except (SystemExit, OSError) as e:
                 self.note = "convert failed: %s" % e
             told = said.getvalue().strip().splitlines()
             if told:
                 self.note = told[-1]
-        incidents, scans = report.summarize(report.load(CANARY_LOG),
-                                            report.load(WITNESS_LOG))
+        incidents, scans = report.summarize(
+            report.load(os.path.join(self.run_dir, "canary.jsonl")),
+            report.load(os.path.join(self.run_dir, "witness.jsonl")))
         buf = io.StringIO()
         report.table(incidents, scans, buf)
         self.report_lines = buf.getvalue().splitlines()
 
-    def worker(self):
-        """USB probing and report rebuilds, off the draw thread.
-
-        `tshark -D` and a conversion over a multi-megabyte pcap both take long
-        enough to stutter the display if done inline.
-        """
-        last_probe = last_refresh = 0.0
-        while not self.quit:
+    def tick(self):
+        """One worker pass. Any error goes to the status line: a dead worker
+        would silently stop USB probing and refreshes."""
+        try:
             now = time.time()
-            if now - last_probe >= PROBE_INTERVAL:
+            if now - self.last_probe >= PROBE_INTERVAL:
+                self.last_probe = now
                 self.ports = probe_ports()
-                last_probe = now
-            due = self.refresh_wanted or (now - last_refresh >= AUTO_REFRESH
-                                          and running(self.witness))
-            if due:
+            if self.refresh_wanted or (now - self.last_refresh >= AUTO_REFRESH
+                                       and running(self.witness)):
                 self.refresh_wanted = False
+                self.last_refresh = now
                 self.refreshing = True
-                try:
-                    self.refresh()
-                finally:
-                    self.refreshing = False
-                last_refresh = time.time()
+                self.refresh()
+        except Exception as e:
+            self.note = "worker error: %s" % e
+        finally:
+            self.refreshing = False
+
+    def worker(self):
+        """USB probing and report rebuilds, off the draw thread, where a
+        conversion would stutter the display."""
+        while not self.quit:
+            self.tick()
             time.sleep(0.25)
 
 
@@ -358,11 +335,7 @@ def put(win, y, x, text, attr=0):
         pass
 
 
-def human_size(path):
-    try:
-        n = os.path.getsize(path)
-    except OSError:
-        return "-"
+def human_size(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
             return "%.0f %s" % (n, unit) if unit == "B" else "%.1f %s" % (n, unit)
@@ -376,16 +349,8 @@ def short_port(path):
 
 
 def status_rows(app):
-    """Per-radio status as (present, cells), cells being columns.
-
-    Columns rather than one preformatted string: fixed padding went ragged the
-    moment a device name or port path changed length -- an ident that exactly
-    filled its field left no gutter at all, and shorter ones left six. Widths
-    belong to whatever is actually on screen, so they are computed in
-    status_lines from both rows together.
-
-    No curses here, so the layout stays checkable without a terminal.
-    """
+    """Per-radio status as (present, cells). Columns, not a padded string:
+    status_lines sizes them from both rows. No curses, so it is testable."""
     dev = app.device
     ident = " ".join(filter(None, (dev.get("model"), dev.get("firmware"))))
 
@@ -395,7 +360,7 @@ def status_rows(app):
         cstate, cextra = "idle", ("last %s" % app.address if app.address else "")
 
     if running(app.witness):
-        wstate, wextra = "capturing", human_size(PCAP)
+        wstate, wextra = "capturing", human_size(pcap_bytes(app.run_dir))
     elif app.address and running(app.canary):
         wstate, wextra = "starting", ""
     else:
@@ -438,21 +403,18 @@ def draw(win, app):
         lines = list(app.feed) or ["(nothing yet -- press s to start)"]
     else:
         lines = app.report_lines or ["(no report yet -- press r)"]
-    # Clamped: KEY_UP has no upper bound of its own, and an unclamped scroll
-    # drives `end` negative, where the slice silently reads from the wrong end
-    # of the list and the pane goes blank.
+    # Clamped: a negative `end` slices from the wrong end and blanks the pane.
     end = max(1, len(lines) - app.scroll)
     for i, line in enumerate(lines[max(0, end - (bottom - top)):end]):
         put(win, top + i, 1, line)
 
     put(win, h - 2, 0, "-" * (w - 1), curses.color_pair(DIM))
-    # The note wins the status line; the collector's last stderr line only
-    # shows when there is nothing else to say. Read the file only then -- draw
-    # runs five times a second and this is otherwise a wasted read per frame.
+    # The note wins; the canary's stderr tail is read only when there is none.
     if app.note:
         text, colour = app.note + ("  [refreshing]" if app.refreshing else ""), DIM
     else:
-        text, colour = tail_file(os.path.join(LOGS, "canary.stderr")), BAD
+        text, colour = tail_file(os.path.join(app.run_dir or LOGS,
+                                              "canary.stderr")), BAD
     if text:
         put(win, h - 2, 1, (" " + text + " ")[:w - 2], curses.color_pair(colour))
     keys = " s start/stop   w re-follow   r refresh   tab %s   q quit " % (
@@ -481,7 +443,8 @@ def loop(stdscr, app):
         elif ch == ord("s"):
             app.stop_all() if running(app.canary) else app.start()
         elif ch == ord("w"):
-            if app.address:
+            # A restarted witness opens a new segment; the old one is kept.
+            if app.address and app.run_dir:
                 stop(app.witness)
                 app.start_witness()
         elif ch == ord("r"):
@@ -519,12 +482,13 @@ def main():
         app.quit = True
         # Never leave a collector holding a serial port after the screen is gone.
         app.stop_all()
-        # A conversion writes witness.jsonl in one pass at the end. Quitting
-        # through it truncates the file and the next report silently reads a
-        # short capture, so give the worker a moment to land it. Bounded, since
-        # the pcap is the evidence and the JSONL can always be rebuilt.
+        # Let an in-flight conversion land. Bounded: the pcap is the evidence
+        # and witness.jsonl can always be rebuilt.
         worker.join(timeout=15)
-    print("logs in %s -- python3 report.py for the full table" % LOGS)
+    if app.run_dir:
+        print("logs in %s -- python3 report.py --dir %s" % (app.run_dir, app.run_dir))
+    else:
+        print("logs in %s" % LOGS)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,6 @@
-"""Pure functions over collector output. No I/O, no globals.
+"""Pure functions over collector output. No I/O, no globals, so CI tests it all.
 
-Everything here is testable with no hardware attached, which is what CI runs.
-Transport lives in canary.py and witness.py and is deliberately not tested.
-
-Shapes are driven by what firmware 0.6.2 actually returns -- see
-docs/hardware-notes.md. The AT parser echoes each command before replying, so
-every reply starts with the command itself.
+Shapes follow what the real firmware returns; see docs/hardware-notes.md §2.
 """
 
 import datetime
@@ -31,11 +26,7 @@ def at_reply(cmd, raw):
 
 
 def status(raw):
-    """Just the OK/ERROR/None terminator of a reply, ignoring any values.
-
-    For fire-and-forget commands where only success matters. Avoids the
-    at_reply("", raw)[1] idiom, which looks like a mistake at a glance.
-    """
+    """Just the OK/ERROR/None terminator, for commands where only success matters."""
     return at_reply("", raw)[1]
 
 
@@ -50,8 +41,7 @@ def conn_state(raw):
 
 
 def rssi(raw):
-    """Peer RSSI in dBm, or None. Firmware returns 0 when not connected,
-    which is not a real reading -- report it as None rather than 0 dBm."""
+    """Peer RSSI in dBm, or None. 0 means "not connected", not 0 dBm (§2)."""
     v = _first("AT+BLEGETRSSI", raw)
     try:
         n = int(v)
@@ -70,18 +60,14 @@ def uart_rx(raw):
 
 
 def peer_addr(raw):
-    """Connected peer's address, or None.
-
-    AT+BLEGETPEERADDR exists from firmware 0.9.0 and returns ERROR on 0.6.2,
-    where identifying the prober is entirely the witness's job.
-    """
+    """Connected peer's address, or None. ERROR on 0.6.2, where naming the
+    prober is entirely the witness's job (§2)."""
     return _first("AT+BLEGETPEERADDR", raw)
 
 
 def gap_intervals(raw):
-    """AT+GAPINTERVALS as a list of ints. Field count is firmware dependent:
-    0.6.2 returns 4 (min conn, max conn, adv interval, adv timeout), 0.9.0
-    returns 5 (adds connection supervision timeout)."""
+    """AT+GAPINTERVALS as a list of ints: min conn, max conn, adv interval, adv
+    timeout, and on 0.9.0 only a fifth, supervision timeout (§1)."""
     values, status = at_reply("AT+GAPINTERVALS", raw)
     if status != "OK" or not values:
         return []
@@ -96,10 +82,7 @@ def gap_intervals(raw):
 
 def adv_timeout(raw):
     """Advertising timeout in seconds; 0 means never stop. None if unreadable.
-
-    0.6.2 caps this at 180 and silently refuses 0. 0.9.0 accepts 0. Read it
-    back rather than assuming the write took -- both firmwares answer OK either
-    way, so the reply status tells you nothing.
+    Read it back: both firmwares answer OK even when the write was refused (§1).
     """
     v = gap_intervals(raw)
     return v[3] if len(v) > 3 else None
@@ -115,31 +98,38 @@ def device_info(raw):
 
 # --- witness side: tshark -T ek records -------------------------------------
 #
-# Field names come from a real capture (tests/fixtures/witness_adv.ek.jsonl).
-# tshark's ek output doubles the layer prefix ("btle_btle_advertising_address"),
-# which is ugly and version-dependent, so fields are looked up by suffix rather
-# than by exact key. That also means a prefix change upstream does not silently
-# turn every field into None.
+# ek doubles the layer prefix ("btle_btle_advertising_address") and that prefix is
+# version-dependent, so fields are looked up by suffix, not exact key.
 
 PDU_TYPES = {
     0: "ADV_IND", 1: "ADV_DIRECT_IND", 2: "ADV_NONCONN_IND", 3: "SCAN_REQ",
     4: "SCAN_RSP", 5: "CONNECT_IND", 6: "ADV_SCAN_IND",
 }
 
-# ek reports the ATT opcode in decimal. Named here because "Read By Group Type
-# Request" tells you someone is enumerating the GATT table and "8" does not.
+# Named because "Read By Group Type Request" says someone is enumerating the
+# GATT table and "16" does not. Even opcodes come from the client, odd from us.
 ATT_OPCODES = {
     0x01: "Error Response",
     0x02: "Exchange MTU Request", 0x03: "Exchange MTU Response",
     0x04: "Find Information Request", 0x05: "Find Information Response",
+    0x06: "Find By Type Value Request", 0x07: "Find By Type Value Response",
     0x08: "Read By Type Request", 0x09: "Read By Type Response",
     0x0A: "Read Request", 0x0B: "Read Response",
     0x0C: "Read Blob Request", 0x0D: "Read Blob Response",
     0x10: "Read By Group Type Request", 0x11: "Read By Group Type Response",
     0x12: "Write Request", 0x13: "Write Response",
+    0x16: "Prepare Write Request", 0x17: "Prepare Write Response",
+    0x18: "Execute Write Request", 0x19: "Execute Write Response",
     0x1B: "Handle Value Notification", 0x1D: "Handle Value Indication",
+    0x1E: "Handle Value Confirmation",
     0x52: "Write Command",
 }
+
+
+def att_dir(opcode):
+    """"prober" for requests/commands/confirmations (even), "bait" for responses,
+    errors, notifications and indications (odd). Unknown counts as prober."""
+    return "bait" if opcode is not None and opcode % 2 else "prober"
 
 
 def field(layers, suffix):
@@ -154,12 +144,7 @@ def field(layers, suffix):
 
 
 def ifield(layers, suffix):
-    """Like field(), but coerced to int.
-
-    tshark's ek writer emits numeric fields as JSON *strings* ("0", "6157",
-    "-24") while booleans stay real booleans. Verified against a real capture --
-    do not assume these arrive as numbers.
-    """
+    """Like field(), but coerced to int: ek emits numbers as JSON strings (§1)."""
     v = field(layers, suffix)
     try:
         return int(v)
@@ -168,11 +153,8 @@ def ifield(layers, suffix):
 
 
 def ek_records(lines):
-    """Yield the packet records from `tshark -T ek` output.
-
-    ek alternates a bare {"index":...} line with the actual record, and our
-    fixtures carry '#' provenance headers. Both are skipped.
-    """
+    """Yield the packet records from `tshark -T ek` output, skipping ek's bare
+    {"index":...} lines and our fixtures' '#' provenance headers."""
     for line in lines:
         line = line.strip()
         if not line.startswith("{"):
@@ -184,16 +166,11 @@ def ek_records(lines):
 
 def witness_event(rec, bait_addr):
     """Map one ek record to a log event, or None if it is not about the bait.
-
-    The sniffer hears the whole neighbourhood; everything not addressed to or
-    from the bait is dropped here. That is what keeps the log all-signal.
-    """
+    The sniffer hears the whole neighbourhood; dropping the rest keeps the log
+    all-signal."""
     layers = rec.get("layers", {})
 
-    # Drop packets that failed CRC. The sniffer hands them over anyway, and a
-    # single flipped bit in an address invents a device that was never there --
-    # observed in a real run as a dozen phantom scanners one bit away from a
-    # genuine address, including one "scanner" that was the bait itself.
+    # CRC failures invent phantom devices one bit off a real address (§1).
     if field(layers, "nordic_ble_crcok") is False:
         return None
 
@@ -202,23 +179,21 @@ def witness_event(rec, bait_addr):
         "channel": ifield(layers, "nordic_ble_channel"),
     }
 
-    # ATT first, and deliberately not address-filtered. Once a connection is up,
-    # link-layer data packets carry no device addresses at all -- filtering them
-    # by address drops every ATT operation. The sniffer is following the bait's
-    # address, so connection traffic in this capture is ours by construction.
+    # ATT is not address-filtered: connection packets carry no addresses, and
+    # the sniffer follows the bait, so they are ours by construction (§1).
     if any(k.startswith("btatt") for k in layers):
         opcode = ifield(layers, "btatt_opcode")
         data["pdu"] = "ATT"
         data["opcode"] = opcode
+        data["dir"] = att_dir(opcode)
         data["op"] = ATT_OPCODES.get(opcode, "0x%02x" % opcode if opcode else None)
         data["handle"] = field(layers, "btatt_handle")
         data["value"] = field(layers, "btatt_value")
         return dict(event="att_op", data=data)
 
-    adv = field(layers, "btle_advertising_address")
-    initiator = field(layers, "btle_initiator_address")
-    scanning = field(layers, "btle_scanning_address")
-    if bait_addr.lower() not in [a.lower() for a in (adv, initiator, scanning) if a]:
+    adv, initiator, scanning = (_addr(field(layers, "btle_%s_address" % k))
+                                for k in ("advertising", "initiator", "scanning"))
+    if bait_addr.lower() not in (adv, initiator, scanning):
         return None
 
     pdu = PDU_TYPES.get(ifield(layers, "advertising_header_pdu_type"))
@@ -229,18 +204,14 @@ def witness_event(rec, bait_addr):
         return dict(event="scan_req", data=data)
     if pdu == "CONNECT_IND":
         data["initiator"] = initiator
-        # randomized_tx tells you whether the initiator address is random or
-        # public -- the difference between a meaningful MAC and a rotating one.
+        # randomized_tx: random (rotating) vs public -- whether the MAC means anything.
         data["initiator_random"] = field(layers, "advertising_header_randomized_tx")
         return dict(event="connect", data=data)
     return None  # plain advertising from our own bait is not an incident
 
 
 def ek_epoch(rec):
-    """Epoch seconds from an ek record, or None.
-
-    tshark's ek writer emits epoch milliseconds as a string.
-    """
+    """Epoch seconds from an ek record (epoch ms as a string), or None."""
     try:
         return int(rec.get("timestamp")) / 1000.0
     except (TypeError, ValueError):
@@ -258,50 +229,23 @@ def iso(epoch):
 def clock_offset(last_frame, capture_end):
     """Seconds to add to sniffer timestamps to put them on the host's clock.
 
-    The nRF sniffer's pcap clock jumps. In one measured run its timestamps sat
-    a constant 71 minutes ahead of real time, and the pcap spanned 78 minutes
-    for 389 seconds of capture. The *rate* is correct -- intervals between
-    events matched the canary's to within two seconds across a six-minute run
-    -- so a single offset corrects the whole file. Do not rescale: fitting a
-    slope to the endpoints assumes a drift that is not there and smears every
-    event across the capture window.
-
-    Anchor it on the *last frame in file order* against the moment the capture
-    stopped (witness.capture_end, never the file's mtime, which any copy or
-    checkout rewrites). Never on max(): some captures hold a second, sparse
-    frame stream whose timestamps run well past the end of the run -- 68
-    minutes past, on a 200-second capture -- so the largest timestamp in the
-    file belongs to that stream and is not when this capture ended. Anchoring
-    there shifts every event by the size of the overshoot, far enough to push
-    the two radios past CONNECT_MERGE_SECONDS, and every connection is then
-    reported twice, once per radio, with the ATT ops on one copy and the RSSI
-    on the other. witness.convert warns when it sees such a file.
-    See docs/hardware-notes.md §1; the 71 minutes above may be the same effect.
-
-    Without this the witness log lands over an hour from the canary log, every
-    event falls outside its true profile window, and attribution silently
-    credits whichever profile happened to be live last. Nothing looks broken:
-    the timestamps are well-formed, just false.
-
-    A healthy clock gives an offset near zero, so this is always safe.
+    One offset, no rescaling: the rate is right. Anchor on the last frame in
+    *file order* (never max(), never mtime) against the recorded capture end.
+    See docs/hardware-notes.md §1 (clock offset, two frame streams).
     """
     if last_frame is None or capture_end is None:
         return 0.0
     return capture_end - last_frame
 
 
-# Fields worth showing on a terminal, in the order they read best. Anything not
-# listed is still in the log file -- this is a view, not a filter.
+# Fields worth showing on a terminal; a view, not a filter -- the log keeps all.
 DETAIL = ("name", "address", "peer", "initiator", "scanner", "rssi", "op",
           "bytes", "before", "after", "error", "reason", "status")
 
 
 def format_event(rec):
-    """One human-readable line for a log record.
-
-    The JSONL file stays canonical and machine-readable; this exists only so a
-    running collector is legible over your shoulder. Unknown event types render
-    fine rather than needing a branch each.
+    """One human-readable line for a log record. Unknown event
+    types render fine rather than needing a branch each.
 
     >>> format_event({"ts": "2026-08-04T01:01:28.817Z", "event": "connect",
     ...               "profile": "keyboard", "data": {"rssi": -50}})
@@ -317,12 +261,8 @@ def format_event(rec):
 
 
 def profile_windows(canary_events):
-    """Build [(start_ts, end_ts_or_None, profile)] from canary log events.
-
-    A window runs from one profile_change to the next; the last one is open
-    ended. This is what gives every incident the name of the bait that was
-    live when it happened -- the most interesting variable in the experiment.
-    """
+    """[(start_ts, end_ts_or_None, profile)], one per profile_change; the last
+    is open ended. This is what names the bait live at each incident."""
     changes = [e for e in canary_events if e.get("event") == "profile_change"]
     changes.sort(key=lambda e: e["ts"])
     windows = []
@@ -334,10 +274,7 @@ def profile_windows(canary_events):
 
 def profile_at(windows, ts):
     """Which profile was live at `ts`. None if it predates the first window.
-
-    ponytail: linear scan. These logs are hundreds of lines, not millions;
-    switch to bisect over start timestamps if that ever stops being true.
-    """
+    Linear scan; logs are small."""
     for start, end, profile in windows:
         if start <= ts and (end is None or ts < end):
             return profile
@@ -346,9 +283,8 @@ def profile_at(windows, ts):
 
 # --- correlation ------------------------------------------------------------
 
-# The canary and the witness both report the same connection a few seconds
-# apart -- one over serial, one off the air. Connects from different sources
-# inside this window are treated as one incident.
+# Both radios report one connection a few seconds apart; connects from
+# different sources inside this window are one incident.
 CONNECT_MERGE_SECONDS = 10
 
 
@@ -361,16 +297,20 @@ def ts_seconds(ts):
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
 
+def _addr(v):
+    return v.lower() if isinstance(v, str) else v
+
+
 def _new_incident(e, windows):
     data = e.get("data") or {}
     return {
         "start": e["ts"], "end": e["ts"],
         "profile": e.get("profile") or profile_at(windows, e["ts"]),
-        "initiator": data.get("initiator"),
+        "initiator": _addr(data.get("initiator")),
         "initiator_random": data.get("initiator_random"),
-        "canary_peer": data.get("peer"),
+        "canary_peer": _addr(data.get("peer")),
         "rssi": [r for r in [data.get("rssi")] if r is not None],
-        "att_ops": {}, "writes": [], "sources": {e.get("source")},
+        "att_ops": {}, "att_replies": 0, "writes": [], "sources": {e.get("source")},
     }
 
 
@@ -379,7 +319,7 @@ def _merge_connect(inc, e):
     for key, src in (("initiator", "initiator"), ("initiator_random", "initiator_random"),
                      ("canary_peer", "peer")):
         if inc.get(key) is None and data.get(src) is not None:
-            inc[key] = data[src]
+            inc[key] = _addr(data[src])
     if data.get("rssi") is not None:
         inc["rssi"].append(data["rssi"])
     inc["sources"].add(e.get("source"))
@@ -388,12 +328,8 @@ def _merge_connect(inc, e):
 
 
 def incidents(canary_events, witness_events):
-    """Merge both streams into incidents keyed by connection window.
-
-    Every incident names the profile that was live when it happened -- without
-    that the report says "something connected" and loses the most interesting
-    variable in the experiment: which bait actually works.
-    """
+    """Merge both streams into incidents, each naming the profile that was live:
+    which bait actually works is the point of the experiment."""
     windows = profile_windows(canary_events)
     events = [e for e in list(canary_events) + list(witness_events) if e.get("ts")]
     events.sort(key=lambda e: e["ts"])
@@ -423,8 +359,12 @@ def incidents(canary_events, witness_events):
             out.append(cur)
             cur = None
         elif ev == "att_op":
-            name = data.get("op") or "unknown"
-            cur["att_ops"][name] = cur["att_ops"].get(name, 0) + 1
+            # Only the prober's ops measure interest; our replies just echo them.
+            if (data.get("dir") or att_dir(data.get("opcode"))) == "bait":
+                cur["att_replies"] += 1
+            else:
+                name = data.get("op") or "unknown"
+                cur["att_ops"][name] = cur["att_ops"].get(name, 0) + 1
             cur["end"] = e["ts"]
         elif ev == "uart_write":
             cur["writes"].append(data.get("bytes"))
@@ -445,11 +385,13 @@ def incidents(canary_events, witness_events):
 
 
 def scan_summary(witness_events):
-    """Who scanned the bait without connecting. Counted per scanner address."""
+    """Who scanned the bait, as [(address, SCAN_REQ count)], busiest first.
+    Events may be pre-aggregated with data.count; older logs default to 1."""
     counts = {}
     for e in witness_events:
         if e.get("event") == "scan_req":
-            addr = (e.get("data") or {}).get("scanner")
+            data = e.get("data") or {}
+            addr = _addr(data.get("scanner"))
             if addr:
-                counts[addr] = counts.get(addr, 0) + 1
+                counts[addr] = counts.get(addr, 0) + data.get("count", 1)
     return sorted(counts.items(), key=lambda kv: -kv[1])

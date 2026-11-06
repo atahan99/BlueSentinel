@@ -187,8 +187,10 @@ def test_incidents_from_the_real_demo_capture():
     assert inc["profile"] == "heartrate", "incident must name the live bait"
     assert inc["initiator"] == "77:18:1c:ff:ff:ff"
     assert inc["initiator_random"] is True
-    assert inc["att_count"] > 0
+    assert inc["att_count"] == 10, "only the prober's requests count"
+    assert inc["att_replies"] == 9
     assert "Read By Type Request" in inc["att_ops"], "GATT enumeration is the fingerprint"
+    assert "Error Response" not in inc["att_ops"], "our replies are not the prober's interest"
     assert inc["rssi_min"] is not None
 
 
@@ -312,3 +314,26 @@ def test_at_reply_basics():
     assert parse.at_reply("AT+GAPGETADDR", "AT+GAPGETADDR\r\nERROR\r\n") == ([], "ERROR")
     assert parse.conn_state("AT+GAPGETCONN\r\n1\r\nOK\r\n") is True
     assert parse.uart_rx("AT+BLEUARTRX\r\nhello\r\nOK\r\n") == "hello"
+
+
+def test_att_direction_by_opcode():
+    assert [parse.att_dir(op) for op in (0x08, 0x52, 0x1E, None)] == ["prober"] * 4
+    assert [parse.att_dir(op) for op in (0x09, 0x01, 0x1B, 0x1D)] == ["bait"] * 4
+
+
+def test_incidents_count_only_prober_ops_and_handle_old_logs():
+    """Old logs have no "dir": fall back to opcode parity, None counts as prober."""
+    ev = lambda op, **d: {"ts": "2026-08-04T00:01:01.000Z", "source": "witness",
+                          "event": "att_op", "data": dict(op="x%s" % op, opcode=op, **d)}
+    w = [{"ts": "2026-08-04T00:01:00.000Z", "source": "witness", "event": "connect",
+          "data": {"initiator": "AA:BB:CC:DD:EE:FF"}},
+         ev(0x08), ev(0x09), ev(None), ev(0x0A, dir="bait")]
+    inc = parse.incidents([], w)[0]
+    assert (inc["att_count"], inc["att_replies"]) == (2, 2)
+    assert inc["initiator"] == "aa:bb:cc:dd:ee:ff"
+
+
+def test_scan_summary_sums_counts_and_lowercases():
+    w = [{"event": "scan_req", "data": {"scanner": "AA:01", "count": 5}},
+         {"event": "scan_req", "data": {"scanner": "aa:01"}}]
+    assert parse.scan_summary(w) == [("aa:01", 6)]

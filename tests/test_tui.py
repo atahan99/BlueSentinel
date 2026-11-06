@@ -48,3 +48,67 @@ def test_status_layout_fits_80_columns():
     assert lines[0].index("idle") == lines[1].index("idle"), lines
     assert not any(l.endswith(" ") for l in lines), lines
     assert max(len(l) for l in lines) + 3 < 80, "must fit an 80-column terminal"
+
+
+def test_pcap_bytes_sums_segments(tmp_path):
+    (tmp_path / "witness-000.pcapng").write_bytes(b"x" * 100)
+    (tmp_path / "witness-001.pcapng").write_bytes(b"x" * 23)
+    (tmp_path / "witness-000.pcapng.end").write_text("1")
+    assert tui.pcap_bytes(str(tmp_path)) == 123
+    assert tui.pcap_bytes(None) == 0
+    assert tui.human_size(123) == "123 B"
+
+
+def no_radios():
+    return {"canary": None, "witness": None}
+
+
+def test_tick_survives_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui, "LOGS", str(tmp_path))
+    monkeypatch.setattr(tui, "probe_ports", no_radios)
+    app = tui.App(types.SimpleNamespace())
+    assert app.run_dir is None
+
+    def boom():
+        raise ValueError("bad line")
+    monkeypatch.setattr(tui, "probe_ports", boom)
+    app.tick()
+    assert app.note == "worker error: bad line"
+
+    app.note = ""
+    monkeypatch.setattr(tui, "probe_ports", no_radios)
+    monkeypatch.setattr(app, "refresh", boom)
+    app.refresh_wanted = True
+    app.tick()
+    assert app.note == "worker error: bad line" and not app.refreshing
+
+
+def test_app_seeds_from_latest_run(tmp_path, monkeypatch):
+    run = tmp_path / "20261107-120000"
+    run.mkdir()
+    (run / "canary.jsonl").write_text(json.dumps(START) + "\n")
+    os.symlink(str(run), str(tmp_path / "latest"))
+    monkeypatch.setattr(tui, "LOGS", str(tmp_path))
+    monkeypatch.setattr(tui, "probe_ports", no_radios)
+    app = tui.App(types.SimpleNamespace())
+    assert app.run_dir == os.path.realpath(str(run))
+    assert app.address == "E1:84:87:02:B3:1E"
+
+
+def test_a_dying_witness_is_not_respawned_every_frame(tmp_path, monkeypatch):
+    """Regression from a live run: a witness that exits at startup was restarted
+    on every frame, five times a second, each leaking a file handle."""
+    monkeypatch.setattr(tui, "LOGS", str(tmp_path))
+    monkeypatch.setattr(tui, "probe_ports", no_radios)
+    started = []
+    dead = types.SimpleNamespace(poll=lambda: 1)
+    monkeypatch.setattr(tui, "spawn", lambda argv, path: started.append(argv) or dead)
+    app = tui.App(types.SimpleNamespace(duration=0))
+    app.run_dir, app.address = str(tmp_path), "E1:84:87:02:B3:1E"
+    app.canary = types.SimpleNamespace(poll=lambda: None)   # canary running
+    for _ in range(5):
+        app.pump()
+    assert len(started) == 1, "restarted %d times without waiting" % len(started)
+    app.witness_started -= tui.WITNESS_RETRY
+    app.pump()
+    assert len(started) == 2 and app.note.startswith("witness exited")
