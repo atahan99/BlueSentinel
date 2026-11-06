@@ -34,6 +34,7 @@ LOGS = os.path.join(ROOT, "logs")
 PROBE_INTERVAL = 3.0     # seconds between USB presence checks
 AUTO_REFRESH = 30.0      # seconds between background report rebuilds
 FEED_MAX = 500           # feed lines kept in memory; the JSONL keeps everything
+WITNESS_RETRY = 10.0     # seconds between witness restarts
 STOP_GRACE = 20.0        # seconds a collector gets to shut down on its own
 # Generous: on SIGINT the witness stops nrfutil and converts before exiting;
 # escalating early would kill that conversion mid-write.
@@ -41,7 +42,6 @@ STOP_GRACE = 20.0        # seconds a collector gets to shut down on its own
 
 # --- probing -----------------------------------------------------------------
 
-NRF_SNIFFER = (0x1915, 0x522A)  # Nordic nRF52840 Dongle running sniffer firmware
 
 
 def probe_ports():
@@ -52,7 +52,7 @@ def probe_ports():
     """
     try:
         return {"canary": canary.find_port(),
-                "witness": canary.find_port(NRF_SNIFFER)}
+                "witness": canary.find_port(witness.NRF_SNIFFER)}
     except OSError:
         return {"canary": None, "witness": None}
 
@@ -113,10 +113,10 @@ def bait_address(records, current):
 def spawn(argv, stderr_path):
     """Start a collector with stdout/stderr in a file (it would corrupt the
     curses screen; the status bar quotes its tail), in its own process group."""
-    fh = open(stderr_path, "ab", buffering=0)
-    return subprocess.Popen([sys.executable] + argv, cwd=ROOT,
-                            stdin=subprocess.DEVNULL, stdout=fh, stderr=fh,
-                            start_new_session=True)
+    with open(stderr_path, "ab", buffering=0) as fh:  # the child keeps its own copy
+        return subprocess.Popen([sys.executable] + argv, cwd=ROOT,
+                                stdin=subprocess.DEVNULL, stdout=fh, stderr=fh,
+                                start_new_session=True)
 
 
 def stop(proc):
@@ -165,6 +165,7 @@ class App:
         self.args = args
         self.canary = None
         self.witness = None
+        self.witness_started = 0.0
         # Seed from the last run so 'r' can still rebuild its report; without
         # the address its pcap cannot be converted.
         self.run_dir = self.address = None
@@ -211,6 +212,7 @@ class App:
         if self.args.duration:
             argv += ["--duration", str(self.args.duration)]
         self.witness = spawn(argv, os.path.join(self.run_dir, "witness.stderr"))
+        self.witness_started = time.time()
         self.witness_address = self.address
         self.note = "witness following %s" % self.address
 
@@ -238,7 +240,14 @@ class App:
         self.address = bait_address(records, self.address)
 
         if self.address and not running(self.witness) and running(self.canary):
-            self.start_witness()
+            # Backoff: a witness that dies at startup (sniffer busy or missing)
+            # was otherwise respawned on every frame, five times a second.
+            if time.time() - self.witness_started >= WITNESS_RETRY:
+                died = self.witness is not None
+                self.start_witness()
+                if died:
+                    self.note = "witness exited, restarting: %s" % tail_file(
+                        os.path.join(self.run_dir, "witness.stderr"))
         elif self.address != before and running(self.witness):
             # Not restarted automatically; the operator decides with 'w'.
             self.note = ("address changed to %s; witness still on %s -- press w"

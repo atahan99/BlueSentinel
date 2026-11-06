@@ -71,7 +71,8 @@ def now():
 
 class Canary:
     def __init__(self, port, baud=9600, timeout=3.0):
-        self.ser = serial.Serial(port, baud, rtscts=True, timeout=0.5)
+        # exclusive: a second canary on the same port would interleave AT replies.
+        self.ser = serial.Serial(port, baud, rtscts=True, timeout=0.5, exclusive=True)
         self.timeout = timeout
         time.sleep(0.5)  # the nRF51 drops bytes sent immediately after open
         self.ser.reset_input_buffer()

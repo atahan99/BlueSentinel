@@ -93,3 +93,22 @@ def test_app_seeds_from_latest_run(tmp_path, monkeypatch):
     app = tui.App(types.SimpleNamespace())
     assert app.run_dir == os.path.realpath(str(run))
     assert app.address == "E1:84:87:02:B3:1E"
+
+
+def test_a_dying_witness_is_not_respawned_every_frame(tmp_path, monkeypatch):
+    """Regression from a live run: a witness that exits at startup was restarted
+    on every frame, five times a second, each leaking a file handle."""
+    monkeypatch.setattr(tui, "LOGS", str(tmp_path))
+    monkeypatch.setattr(tui, "probe_ports", no_radios)
+    started = []
+    dead = types.SimpleNamespace(poll=lambda: 1)
+    monkeypatch.setattr(tui, "spawn", lambda argv, path: started.append(argv) or dead)
+    app = tui.App(types.SimpleNamespace(duration=0))
+    app.run_dir, app.address = str(tmp_path), "E1:84:87:02:B3:1E"
+    app.canary = types.SimpleNamespace(poll=lambda: None)   # canary running
+    for _ in range(5):
+        app.pump()
+    assert len(started) == 1, "restarted %d times without waiting" % len(started)
+    app.witness_started -= tui.WITNESS_RETRY
+    app.pump()
+    assert len(started) == 2 and app.note.startswith("witness exited")

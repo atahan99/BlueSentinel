@@ -98,7 +98,8 @@ def test_capture_never_overwrites_a_segment(tmp_path, monkeypatch):
     for i, pcap in enumerate(new, 1):
         assert os.path.basename(pcap) == "witness-%03d.pcapng" % i
         assert open(pcap, "rb").read() == b"new"
-        assert witness.capture_end(pcap) > start
+        # Anchored on when the last frame was written, not when the stop came.
+        assert abs(witness.capture_end(pcap) - os.path.getmtime(pcap)) < 0.01
 
 
 def test_convert_warns_when_a_capture_is_not_monotonic(tmp_path, capsys):
@@ -169,7 +170,7 @@ def test_convert_run_reconverts_only_unfinished_segments(tmp_path):
     assert not list(run.glob("*.tmp")), "temp files must be renamed into place"
 
 
-def test_live_convert_anchors_on_now(tmp_path):
+def test_live_convert_anchors_on_the_last_write(tmp_path):
     """Without a .end, a live conversion must land near now, not in the future.
 
     Regression: the pcap clock was measured 4297 s ahead, and a live capture has
@@ -186,11 +187,15 @@ def test_live_convert_anchors_on_now(tmp_path):
     shim.chmod(0o755)
     pcap = tmp_path / "witness-000.pcapng"
     pcap.write_bytes(b"x")
+    # Last frame written five minutes ago -- a stalled sniffer. The anchor is
+    # the file's mtime, not "now", or every frame would land 300 s late.
+    written = time.time() - 300
+    os.utime(str(pcap), (written, written))
 
     witness.convert(str(shim), str(pcap), BAIT, str(tmp_path / "o.jsonl"), live=True)
     stamps = [parse.ts_seconds(json.loads(l)["ts"])
               for l in (tmp_path / "o.jsonl").read_text().splitlines()]
-    assert stamps and all(abs(s - time.time()) < 5 for s in stamps), stamps
+    assert stamps and all(abs(s - written) < 5 for s in stamps), stamps
 
 
 def test_scan_reqs_are_counted_per_scanner_per_minute(tmp_path):
@@ -229,3 +234,35 @@ def test_convert_run_skips_a_segment_with_nothing_written_yet(tmp_path):
     (tmp_path / "witness-000.pcapng").write_bytes(b"")
     assert witness.convert_run("/nonexistent/tshark", str(tmp_path), BAIT, live=True) == 0
     assert (tmp_path / "witness.jsonl").read_text() == ""
+
+
+def test_a_second_sigint_during_shutdown_still_writes_the_anchor(tmp_path):
+    """Regression from a live console run: the witness's --duration expired and,
+    while it was stopping the sniffer, the console sent its own SIGINT. That
+    interrupt aborted the shutdown, so no .end was written and nothing was
+    converted."""
+    import signal
+    import threading
+    import witness
+
+    nrfutil = tmp_path / "fake_nrfutil"
+    nrfutil.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  [ \"$1\" = --output-pcap-file ] && out=$2\n"
+        "  shift\n"
+        "done\n"
+        "printf 'frames' > \"$out\"\n"
+        "trap 'sleep 1; exit 0' INT TERM\n"   # slow to exit, like the real sniffer
+        "sleep 30\n")
+    nrfutil.chmod(0o755)
+    run = tmp_path / "run"
+
+    t = threading.Timer(0.7, os.kill, (os.getpid(), signal.SIGINT))  # mid-shutdown
+    t.start()
+    try:
+        witness.capture(str(nrfutil), "/dev/null", BAIT, str(run), duration=0.3)
+    finally:
+        t.cancel()
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+    assert witness.capture_end(str(run / "witness-000.pcapng")) is not None

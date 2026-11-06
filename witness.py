@@ -46,13 +46,27 @@ def find_binary(name, fallbacks, flag):
              % (name, ", ".join(fallbacks), flag))
 
 
+NRF_SNIFFER = (0x1915, 0x522A)  # Nordic nRF52840 Dongle running sniffer firmware
+
+
 def find_sniffer(tshark):
-    """Interface name of the sniffer, from `tshark -D`.
+    """Serial port of the sniffer: by USB id, else from `tshark -D`.
+
+    USB first because `tshark -D` opens the dongle to identify it, which hides
+    a busy one and can splice a second stream into a running capture
+    (docs/hardware-notes.md §1).
 
     The nrfutil extcap shim names the interface after the serial device path,
     which is host-specific -- so this is discovered, never hardcoded. The name
     doubles as the serial port nrfutil wants.
     """
+    try:
+        from serial.tools import list_ports
+        for p in list_ports.comports():
+            if (p.vid, p.pid) == NRF_SNIFFER:
+                return p.device
+    except ImportError:
+        pass
     out = subprocess.run([tshark, "-D"], capture_output=True, text=True).stdout
     for line in out.splitlines():
         if SNIFFER_MARK in line:
@@ -123,6 +137,7 @@ def capture(nrfutil, port, address, run_dir, duration=0):
         wait = SEGMENT_SECONDS
         if deadline:
             wait = max(0, min(wait, deadline - time.time()))
+        done = False
         try:
             proc.wait(timeout=wait)
             done = True  # nrfutil quit by itself; restarting would only spin
@@ -135,12 +150,24 @@ def capture(nrfutil, port, address, run_dir, duration=0):
             done = True
             print("capture stopped", file=sys.stderr)
         finally:
+            # A second SIGINT must not cut the shutdown short: the console
+            # sends one just as --duration expires, and it skipped the .end
+            # and the conversion. Once done, it stays ignored until exit, so
+            # the conversion finishes too; SIGTERM still stops everything.
+            try:
+                previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            except ValueError:  # not the main thread (tests); nothing to guard
+                previous = None
             stop(proc)
-            # When the segment really ended, for capture_end(). The sniffer's
-            # clock cannot be trusted and mtime moves on any copy or checkout.
+            # When the last frame was written, for capture_end(): the pcap's
+            # mtime, read now, before any copy or checkout can move it. Not
+            # the stop time -- a sniffer that stalled 96 s before the stop
+            # shifted every frame 96 s late (docs/hardware-notes.md §1).
             if os.path.exists(pcap):
                 with open(pcap + ".end", "w") as fh:
-                    fh.write("%.3f\n" % time.time())
+                    fh.write("%.3f\n" % os.path.getmtime(pcap))
+            if previous is not None and not done:
+                signal.signal(signal.SIGINT, previous)
         if done:
             return
 
@@ -205,10 +232,10 @@ def convert(tshark, pcap, address, out_path, live=False):
 
     anchor = capture_end(pcap)
     if anchor is None and live:
-        # No .end until the segment stops. The bait advertises several times a
-        # second, so a live capture's last frame is ~now; uncorrected, a live
-        # report was measured 72 minutes in the future.
-        anchor = time.time()
+        # No .end until the segment stops, but the file is still ours, so its
+        # mtime is when its last frame landed. Uncorrected, a live report was
+        # measured 72 minutes in the future.
+        anchor = os.path.getmtime(pcap)
     offset = parse.clock_offset(last, anchor)
 
     # One scan_req per scanner per minute, with a count: every phone nearby
