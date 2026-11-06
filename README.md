@@ -70,11 +70,11 @@ as identity would have reported six attackers ([docs/demo.md](docs/demo.md)).
 |---|---|
 | [Adafruit Bluefruit LE Friend](https://www.adafruit.com/product/2267) | the bait. Any board reporting `BLEFRIEND32` |
 | [Nordic nRF52840 Dongle (PCA10059)](https://www.nordicsemi.com/Products/Development-hardware/nRF52840-Dongle) | the witness |
-| macOS or Linux | Python 3.9+, two USB ports |
+| macOS or Linux | Python 3.10+, two USB ports |
 
 Software: `pyserial`, `pytest` for the tests, and the `tshark` binary. Verified on macOS
 26.6 (Apple Silicon) with Bluefruit firmware 0.6.2 and 0.9.0, sniffer firmware 4.1.1,
-nrfutil 8.2.0, tshark 4.6.7. CI runs on Ubuntu and macOS under Python 3.9 and 3.13.
+nrfutil 8.2.0, tshark 4.6.7. CI runs on Ubuntu and macOS under Python 3.10 and 3.13.
 Windows is out of scope.
 
 ## Install
