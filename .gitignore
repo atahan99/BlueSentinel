@@ -4,7 +4,10 @@ __pycache__/
 .venv/
 venv/
 *.pcapng
-!docs/sample-capture.pcapng
+*.jsonl
+!docs/sample-run/witness-000.pcapng
+!tests/fixtures/*.jsonl
+docs/sample-run/*.jsonl
 .pytest_cache/
 .DS_Store
 .claude/
