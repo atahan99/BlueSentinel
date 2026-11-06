@@ -43,7 +43,8 @@ def fmt_rssi(inc):
 
 
 def fmt_addr(inc):
-    addr = inc["initiator"] or inc["canary_peer"] or "unknown"
+    # canary_peer is whatever the bait reported, so escape it before a terminal.
+    addr = parse.safe(inc["initiator"] or inc["canary_peer"] or "unknown")
     if inc.get("initiator_random"):
         addr += " (random)"
     return addr

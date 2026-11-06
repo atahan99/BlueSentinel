@@ -16,6 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import parse  # noqa: E402
 from canary import Canary, find_port  # noqa: E402  -- one serial path
 
 
@@ -41,7 +42,9 @@ def main():
         for cmd in args.commands:
             print("\n$ %s" % cmd)
             reply = dev.cmd(cmd)
-            print(reply if reply else "<no response within %.1fs>" % args.timeout)
+            # Escaped per line: a connected peer's UART bytes are attacker data.
+            print("\n".join(parse.safe(l) for l in reply.splitlines()) if reply
+                  else "<no response within %.1fs>" % args.timeout)
     finally:
         dev.close()
 

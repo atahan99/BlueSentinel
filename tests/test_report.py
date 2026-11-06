@@ -18,3 +18,8 @@ def test_load_skips_corrupt_lines_with_one_warning(tmp_path, capsys):
 
 def test_load_missing_file_is_empty(tmp_path):
     assert report.load(str(tmp_path / "nope.jsonl")) == []
+
+
+def test_table_escapes_a_canary_reported_peer():
+    inc = {"initiator": None, "canary_peer": "\x1b]0;pwn\x07", "initiator_random": None}
+    assert "\x1b" not in report.fmt_addr(inc) and "\\x1b" in report.fmt_addr(inc)
