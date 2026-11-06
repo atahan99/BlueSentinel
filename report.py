@@ -43,7 +43,8 @@ def fmt_rssi(inc):
 
 
 def fmt_addr(inc):
-    addr = inc["initiator"] or inc["canary_peer"] or "unknown"
+    # canary_peer is whatever the bait reported, so escape it before a terminal.
+    addr = parse.safe(inc["initiator"] or inc["canary_peer"] or "unknown")
     if inc.get("initiator_random"):
         addr += " (random)"
     return addr
@@ -82,13 +83,21 @@ def table(incidents, scans, out):
                   "sessions.\n")
 
 
+def _cell(v):
+    # A prober's UART bytes land in bytes_written; a leading = + - @ would run
+    # as a formula in a spreadsheet. Numbers (rssi) stay numbers.
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
 def write_csv(incidents, out):
     w = csv.writer(out)
     w.writerow(["start", "end", "profile", "prober", "address_is_random",
                 "rssi_min", "rssi_max", "att_count", "att_replies", "att_ops",
                 "bytes_written", "sources"])
     for inc in incidents:
-        w.writerow([
+        w.writerow([_cell(v) for v in [
             inc["start"], inc["end"], inc["profile"] or "",
             inc["initiator"] or inc["canary_peer"] or "",
             inc.get("initiator_random") or "",
@@ -98,7 +107,7 @@ def write_csv(incidents, out):
             "; ".join("%dx %s" % (n, op) for op, n in sorted(inc["att_ops"].items())),
             "; ".join(str(x) for x in inc["writes"]),
             "+".join(inc["sources"]),
-        ])
+        ]])
 
 
 def summarize(canary, witness):

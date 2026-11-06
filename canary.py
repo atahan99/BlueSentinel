@@ -77,19 +77,26 @@ class Canary:
         time.sleep(0.5)  # the nRF51 drops bytes sent immediately after open
         self.ser.reset_input_buffer()
 
-    def cmd(self, c):
-        """Send one AT command, return the raw reply text (echo included)."""
+    def cmd(self, c, drain=False):
+        """Send one AT command, return the raw reply text (echo included).
+
+        drain: keep reading past OK/ERROR until the line goes quiet. UART data
+        written by a peer can itself contain "OK"; only the last one is real."""
         self.ser.reset_input_buffer()
         self.ser.write((c + "\r\n").encode())  # explicit, never os.linesep
         self.ser.flush()
-        out, deadline = [], time.time() + self.timeout
+        out, done, deadline = [], False, time.time() + self.timeout
         while time.time() < deadline:
             line = self.ser.readline().decode("utf-8", "replace")
             if not line:
+                if done:
+                    break  # a full serial timeout (0.5 s) of silence
                 continue
             out.append(line)
             if line.strip() in parse.TERMINATORS:
-                break
+                done = True
+                if not drain:
+                    break
         return "".join(out)
 
     def close(self):
@@ -230,7 +237,7 @@ def run_session(dev, log, profiles, args):
                 connected = is_conn
 
                 if is_conn:
-                    written = parse.uart_rx(dev.cmd("AT+BLEUARTRX"))
+                    written = parse.uart_rx(dev.cmd("AT+BLEUARTRX", drain=True))
                     if written:
                         log.write("uart_write", profile=profile["id"], bytes=written)
 

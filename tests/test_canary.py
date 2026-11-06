@@ -32,6 +32,11 @@ def fake_canary(lines):
 UART = [b"AT+BLEUARTRX\r\n", b"hi\r\n", b"OK\r\n", b"secret\r\n", b"OK\r\n"]
 
 
+def test_drain_keeps_data_after_a_fake_ok():
+    reply = fake_canary(UART).cmd("AT+BLEUARTRX", drain=True)
+    assert parse.uart_rx(reply) == "hi\nOK\nsecret"
+
+
 def test_cmd_stops_at_first_terminator_by_default():
     assert fake_canary(UART).cmd("AT+BLEUARTRX") == "AT+BLEUARTRX\r\nhi\r\nOK\r\n"
 

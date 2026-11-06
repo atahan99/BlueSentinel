@@ -316,6 +316,12 @@ def test_at_reply_basics():
     assert parse.uart_rx("AT+BLEUARTRX\r\nhello\r\nOK\r\n") == "hello"
 
 
+def test_format_event_escapes_terminal_control_bytes():
+    """A peer's UART bytes reach the terminal; they must not drive it."""
+    line = parse.format_event({"event": "uart_write", "data": {"bytes": "\x1b[31mX"}})
+    assert "\\x1b" in line and "\x1b" not in line
+
+
 def test_att_direction_by_opcode():
     assert [parse.att_dir(op) for op in (0x08, 0x52, 0x1E, None)] == ["prober"] * 4
     assert [parse.att_dir(op) for op in (0x09, 0x01, 0x1B, 0x1D)] == ["bait"] * 4

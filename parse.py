@@ -243,8 +243,14 @@ DETAIL = ("name", "address", "peer", "initiator", "scanner", "rssi", "op",
           "bytes", "before", "after", "error", "reason", "status")
 
 
+def safe(s):
+    """Escape control characters: a peer's UART bytes reach the terminal, and
+    must not be able to drive it with ANSI escape sequences."""
+    return str(s).encode("unicode_escape").decode("ascii")
+
+
 def format_event(rec):
-    """One human-readable line for a log record. Unknown event
+    """One human-readable, terminal-safe line for a log record. Unknown event
     types render fine rather than needing a branch each.
 
     >>> format_event({"ts": "2026-08-04T01:01:28.817Z", "event": "connect",
@@ -254,10 +260,10 @@ def format_event(rec):
     data = rec.get("data") or {}
     detail = ["%d dBm" % v if k == "rssi" else str(v)
               for k, v in ((k, data.get(k)) for k in DETAIL) if v is not None]
-    return "%s  %-15s %-11s %s" % ((rec.get("ts") or "")[11:19] or "--:--:--",
-                                   rec.get("event") or "-",
-                                   rec.get("profile") or "",
-                                   "  ".join(detail))
+    return safe("%s  %-15s %-11s %s" % ((rec.get("ts") or "")[11:19] or "--:--:--",
+                                        rec.get("event") or "-",
+                                        rec.get("profile") or "",
+                                        "  ".join(detail)))
 
 
 def profile_windows(canary_events):
